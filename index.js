@@ -41,7 +41,7 @@ if(process.env.CRON_SETTING) {
   console.log('CRON_SETTING set to default (20 * * * *)'); 
 }
 if(process.env.TOKEN) { 
-  console.log('LIBRARY_ID is set to: ' + process.env.TOKEN); 
+  console.log('TOKEN is set to: ' + process.env.TOKEN); 
   TOKEN = process.env.TOKEN;
 } else { 
   console.log('TOKEN is mandatory exiting');
