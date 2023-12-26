@@ -27,7 +27,7 @@ if(process.env.LIBRARY_ID) {
   process.exit();
 }
 if(process.env.MAX_PARALLEL_CONVERSIONS) { 
-  console.log('MAX_PARALLEL_CONVERSIONS is set to: ' + process.env.LIBRARY_ID); 
+  console.log('MAX_PARALLEL_CONVERSIONS is set to: ' + process.env.MAX_PARALLEL_CONVERSIONS); 
   MAX_PARALLEL_CONVERSIONS = process.env.MAX_PARALLEL_CONVERSIONS;
 } else { 
   MAX_PARALLEL_CONVERSIONS = 5;
