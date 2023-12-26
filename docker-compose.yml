@@ -1,0 +1,13 @@
+version: '3.3'
+services:
+  abs-autoconverter:
+    image: cutzenfriend/abs-autoconverter:latest
+    container_name: abs-autoconverter
+    restart: unless-stopped
+    environment:
+      TZ: "Europe/Berlin"
+      DOMAIN: "https://abs.example.com" #Please edit - mandatory
+      LIBRARY_ID: "YOUR AUDIOBOOKSHELF LIBRARY ID" #Please edit - mandatory
+      MAX_PARALLEL_CONVERSIONS: 3 #Keep CPU power in mind. Too many conversion in parallel decrease performance on your host!
+      #CRON_SETTING: #optional - default is: (20 * * * * ) - every hour at minute 20
+      TOKEN: "YOUR AUDIOBOOKSHELF API TOKEN" #Please edit - mandatory
