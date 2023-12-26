@@ -11,8 +11,6 @@ Your need your own running instance of Audiobookshelf for this Docker to work!
   </p>
 </p>
 
-
-
 ## About The Project
 
 I had a huge library of Audiobooks. Some of them were already .m4b but most of them were multiple mp3's.
@@ -22,12 +20,14 @@ I wanted to archive 3 things:
 2. Automatic convert of newly added Audiobooks if they are not single file .m4b and let it check in cron style within a container.
 3. Don't use 3rd party software and use the built in converter of Audiobookshelf instead. So the API of Audiobookshelf was the way to go.
 
-## Built With
+https://hub.docker.com/r/cutzenfriend/abs-autoconverter
 
-Built with the latest node container as base and 2 further node modules.
+## How it works
 
-* [Node-Cron](https://www.npmjs.com/package//node-cron)
-* [Axios](https://www.npmjs.com/package/axios)
+1. Get all items from the specified library. Filtered so that only multifile Audiobooks get returned
+2. Start the .m4b converting process for the specified amount of Audiobooks via API
+3. Wait and repeat until no more Audiobooks to convert are available
+4. Look every (hour) for new multifile books
 
 ## Getting Started
 
@@ -54,3 +54,10 @@ TOKEN: "YOUR AUDIOBOOKSHELF API TOKEN" #Please edit - mandatory
 ## Acknowledgements
 
 * [audiobookshelf](https://github.com/advplyr/audiobookshelf)
+
+## Built With
+
+Built with the latest node container as base and 2 further node modules.
+
+* [Node-Cron](https://www.npmjs.com/package//node-cron)
+* [Axios](https://www.npmjs.com/package/axios)
