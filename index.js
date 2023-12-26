@@ -56,7 +56,7 @@ function extractItems(obj, results = []) {
         if (obj.id && obj.media?.metadata?.title) {
             results.push(`ID: ${obj.id}, Titel: ${obj.media.metadata.title}`);
             console.log("ID: " + obj.id + " Name: " + obj.media.metadata.title);
-            axios.post(`https://DOMAIN/api/tools/item/${obj.id}/encode-m4b?token=${TOKEN}`)
+            axios.post(`${DOMAIN}/api/tools/item/${obj.id}/encode-m4b?token=${TOKEN}`)
             .then(response2 => {
             })
             .catch(error2 => {
