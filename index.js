@@ -6,6 +6,7 @@ var DOMAIN;
 var LIBRARY_ID;
 var CRON_SETTING;
 var TOKEN;
+var BITRATE;
 
 if(process.env.TZ) { 
   console.log('Timezone is set to: ' + process.env.TZ); 
@@ -47,6 +48,13 @@ if(process.env.TOKEN) {
   console.log('TOKEN is mandatory exiting');
   process.exit();
 }
+if(process.env.BITRATE) { 
+  console.log('Bitrate for conversion ist set to: ' + process.env.BITRATE);
+  BITRATE = process.env.BITRATE;
+} else { 
+  BITRATE = "128k";
+  console.log('Bitrate for conversion ist set to default 128k');
+}
 const url = DOMAIN + '/api/libraries/' + LIBRARY_ID + '/items?limit=' + MAX_PARALLEL_CONVERSIONS + '&page=0&filter=tracks.bXVsdGk%3D';
 const headers = { Authorization: 'Bearer ' + TOKEN };
 function extractItems(obj, results = []) {
@@ -56,7 +64,7 @@ function extractItems(obj, results = []) {
         if (obj.id && obj.media?.metadata?.title) {
             results.push(`ID: ${obj.id}, Titel: ${obj.media.metadata.title}`);
             console.log("ID: " + obj.id + " Name: " + obj.media.metadata.title);
-            axios.post(`${DOMAIN}/api/tools/item/${obj.id}/encode-m4b?token=${TOKEN}`)
+            axios.post(`${DOMAIN}/api/tools/item/${obj.id}/encode-m4b?token=${TOKEN}&bitrate=${BITRATE}`)
             .then(response2 => {
             })
             .catch(error2 => {
