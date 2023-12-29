@@ -50,7 +50,7 @@ services:
       LIBRARY_ID: "YOUR AUDIOBOOKSHELF LIBRARY ID" #Please edit - mandatory
       MAX_PARALLEL_CONVERSIONS: 3 #Keep CPU power in mind. Too many conversion in parallel decrease performance on your host!
       #CRON_SETTING: #optional - default is: (20 * * * * ) - every hour at minute 20
-      BITRATE: #optional - default is: 128k 
+      BITRATE: "128k" #optional - default is: 128k 
       TOKEN: "YOUR AUDIOBOOKSHELF API TOKEN" #Please edit - mandatory
 ```
 
