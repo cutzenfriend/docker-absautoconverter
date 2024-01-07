@@ -4,8 +4,8 @@
 
   <p align="center">
     A Docker to automatically convert all your current and future Audiobooks within Audiobookshelf to the single file .m4b format.
-Your need your own running instance of Audiobookshelf for this Docker to work!
-(It must not run on the same host tho.)
+Your need (of cause) a running instance of Audiobookshelf for this Docker to work with!
+(It can run on a different host than audiobookshelf if necessary)
     <br/>
     <br/>
   </p>
