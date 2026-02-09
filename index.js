@@ -95,22 +95,23 @@ async function getSourceBitrate(itemId) {
   }
 }
 
-async function getActiveConversionCount() {
+async function getActiveConversions() {
   try {
     const response = await axios.get(`${DOMAIN}/api/tasks`, { headers });
     const tasks = response.data?.tasks || [];
     const active = tasks.filter(t =>
       t.action && t.action.includes('encode-m4b') && !t.isFinished && !t.isFailed
     );
-    return active.length;
+    const activeItemIds = new Set(active.map(t => t.data?.libraryItemId).filter(Boolean));
+    return { count: active.length, activeItemIds };
   } catch (error) {
     log('Warning: failed to fetch tasks, falling back to full slot count: ' + error.message);
-    return -1;
+    return { count: -1, activeItemIds: new Set() };
   }
 }
 
 async function start() {
-  const activeCount = await getActiveConversionCount();
+  const { count: activeCount, activeItemIds } = await getActiveConversions();
   let slotsAvailable;
   if (activeCount < 0) {
     slotsAvailable = MAX_PARALLEL_CONVERSIONS;
@@ -148,6 +149,11 @@ async function start() {
 
     for (const item of items) {
       if (slotsAvailable <= 0) break;
+
+      if (activeItemIds.has(item.id)) {
+        log('Skipping (already converting): ' + item.title);
+        continue;
+      }
 
       let bitrate = BITRATE;
       if (BITRATE === 'source') {
