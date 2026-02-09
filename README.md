@@ -24,10 +24,11 @@ https://hub.docker.com/r/cutzenfriend/abs-autoconverter
 
 ## How it works
 
-1. Get all items from the specified library. Filtered so that only multifile Audiobooks get returned
-2. Start the .m4b converting process for the specified amount of Audiobooks via API
-3. Wait and repeat until no more Audiobooks to convert are available
-4. Look every (hour) for new multifile books
+1. Check for active `.m4b` conversion tasks on the server and calculate available slots (`MAX_PARALLEL_CONVERSIONS` minus active conversions)
+2. For each configured library (supports multiple, comma-separated), fetch multi-file audiobooks via the Audiobookshelf API
+3. Start `.m4b` conversions for available slots — libraries are processed sequentially and share the slot pool
+4. Encoding uses the configured `BITRATE`, or when set to `"source"`, matches each item's original audio bitrate
+5. Repeat on a cron schedule (default: every hour at minute 20)
 
 ## Getting Started
 
@@ -47,12 +48,24 @@ services:
     environment:
       TZ: "Europe/Berlin"
       DOMAIN: "https://abs.example.com" #Please edit - mandatory
-      LIBRARY_ID: "YOUR AUDIOBOOKSHELF LIBRARY ID" #Please edit - mandatory
+      LIBRARY_ID: "lib1-id,lib2-id" #Please edit - mandatory, comma-separated for multiple libraries
       MAX_PARALLEL_CONVERSIONS: 3 #Keep CPU power in mind. Too many conversion in parallel decrease performance on your host!
       #CRON_SETTING: #optional - default is: (20 * * * * ) - every hour at minute 20
-      BITRATE: "128k" #optional - default is: 128k 
+      BITRATE: "128k" #optional - default is 128k, set to "source" to match each item's original bitrate
       TOKEN: "YOUR AUDIOBOOKSHELF API TOKEN" #Please edit - mandatory
 ```
+
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `DOMAIN` | Yes | — | Audiobookshelf server URL (e.g. `https://abs.example.com`) |
+| `LIBRARY_ID` | Yes | — | Audiobookshelf library ID(s). Comma-separated for multiple libraries (e.g. `lib1-id,lib2-id`) |
+| `TOKEN` | Yes | — | Audiobookshelf API token |
+| `MAX_PARALLEL_CONVERSIONS` | No | `5` | Maximum concurrent conversions. Active tasks are checked before each cycle so this limit is respected across runs |
+| `CRON_SETTING` | No | `20 * * * *` | Cron expression for the check interval |
+| `BITRATE` | No | `128k` | M4B encoding bitrate. Set to `"source"` to match each item's original audio bitrate |
+| `TZ` | No | `Europe/Berlin` | Container timezone |
 
 ## Acknowledgements
 
