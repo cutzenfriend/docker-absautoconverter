@@ -17,6 +17,7 @@ var TOKEN;
 var BITRATE;
 var MAX_CONVERSION_FAILURES;
 var FAILURE_PERSIST_PATH;
+var CODEC;
 
 if (process.env.TZ) {
   log('Timezone is set to: ' + process.env.TZ);
@@ -68,6 +69,13 @@ if (process.env.BITRATE) {
 } else {
   BITRATE = '128k';
   log('BITRATE set to default 128k');
+}
+if (process.env.CODEC) {
+  CODEC = process.env.CODEC;
+  log('CODEC is set to: ' + CODEC);
+} else {
+  CODEC = null;
+  log('CODEC not set, using Audiobookshelf default (aac)');
 }
 if (process.env.MAX_CONVERSION_FAILURES) {
   MAX_CONVERSION_FAILURES = parseInt(process.env.MAX_CONVERSION_FAILURES);
@@ -239,7 +247,8 @@ async function start() {
 
       log('Starting conversion: ' + item.title);
       try {
-        await axios.post(`${DOMAIN}/api/tools/item/${item.id}/encode-m4b?token=${TOKEN}&bitrate=${bitrate}`);
+        const codecParam = CODEC ? `&codec=${CODEC}` : '';
+        await axios.post(`${DOMAIN}/api/tools/item/${item.id}/encode-m4b?token=${TOKEN}&bitrate=${bitrate}${codecParam}`);
       } catch (error) {
         log('Error starting conversion for ' + item.title + ': ' + error.message);
       }
