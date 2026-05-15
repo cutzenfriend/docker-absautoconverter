@@ -25,10 +25,11 @@ https://hub.docker.com/r/cutzenfriend/abs-autoconverter
 ## How it works
 
 1. Check for active `.m4b` conversion tasks on the server and calculate available slots (`MAX_PARALLEL_CONVERSIONS` minus active conversions)
-2. For each configured library (supports multiple, comma-separated), fetch multi-file audiobooks via the Audiobookshelf API
-3. Start `.m4b` conversions for available slots — libraries are processed sequentially and share the slot pool
-4. Encoding uses the configured `BITRATE`, or when set to `"source"`, matches each item's original audio bitrate
-5. Repeat on a cron schedule (default: every hour at minute 20)
+2. Detect any newly failed conversion tasks and increment their failure counter — items that reach `MAX_CONVERSION_FAILURES` are skipped in all future cycles
+3. For each configured library (supports multiple, comma-separated), fetch multi-file audiobooks via the Audiobookshelf API
+4. Start `.m4b` conversions for available slots — libraries are processed sequentially and share the slot pool; already-converting and failure-blocked items are skipped
+5. Encoding uses the configured `BITRATE`, or when set to `"source"`, matches each item's original audio bitrate
+6. Repeat on a cron schedule (default: every hour at minute 20)
 
 ## Getting Started
 
@@ -65,7 +66,25 @@ services:
 | `MAX_PARALLEL_CONVERSIONS` | No | `5` | Maximum concurrent conversions. Active tasks are checked before each cycle so this limit is respected across runs |
 | `CRON_SETTING` | No | `20 * * * *` | Cron expression for the check interval |
 | `BITRATE` | No | `128k` | M4B encoding bitrate. Set to `"source"` to match each item's original audio bitrate |
+| `MAX_CONVERSION_FAILURES` | No | `3` | Number of failed conversion attempts before an item is permanently skipped. Reset by restarting the container (or persisted via `FAILURE_PERSIST_PATH`) |
+| `FAILURE_PERSIST_PATH` | No | — | Path to a JSON file for persisting failure counts across container restarts (e.g. `/data/failures.json`). Requires a volume mount |
 | `TZ` | No | `Europe/Berlin` | Container timezone |
+
+### Persistent failure tracking (optional)
+
+If a book keeps failing (e.g. due to bad metadata), the app will skip it after `MAX_CONVERSION_FAILURES` attempts and log a warning. By default the failure count resets when the container restarts. To persist it across restarts, mount a volume and set `FAILURE_PERSIST_PATH`:
+
+```yaml
+services:
+  abs-autoconverter:
+    ...
+    environment:
+      FAILURE_PERSIST_PATH: "/data/failures.json"
+    volumes:
+      - ./data:/data
+```
+
+To retry a skipped book, fix its metadata in Audiobookshelf and delete its entry from the JSON file (or delete the file entirely), then restart the container.
 
 ## Acknowledgements
 
