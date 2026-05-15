@@ -1,5 +1,6 @@
 const axios = require('axios');
 const cron = require('node-cron');
+const fs = require('fs');
 
 function log(message) {
   const now = new Date();
@@ -14,6 +15,8 @@ var MAX_PARALLEL_CONVERSIONS;
 var CRON_SETTING;
 var TOKEN;
 var BITRATE;
+var MAX_CONVERSION_FAILURES;
+var FAILURE_PERSIST_PATH;
 
 if (process.env.TZ) {
   log('Timezone is set to: ' + process.env.TZ);
@@ -66,8 +69,52 @@ if (process.env.BITRATE) {
   BITRATE = '128k';
   log('BITRATE set to default 128k');
 }
+if (process.env.MAX_CONVERSION_FAILURES) {
+  MAX_CONVERSION_FAILURES = parseInt(process.env.MAX_CONVERSION_FAILURES);
+  log('MAX_CONVERSION_FAILURES is set to: ' + MAX_CONVERSION_FAILURES);
+} else {
+  MAX_CONVERSION_FAILURES = 3;
+  log('MAX_CONVERSION_FAILURES set to default 3');
+}
+if (process.env.FAILURE_PERSIST_PATH) {
+  FAILURE_PERSIST_PATH = process.env.FAILURE_PERSIST_PATH;
+  log('FAILURE_PERSIST_PATH is set to: ' + FAILURE_PERSIST_PATH);
+} else {
+  FAILURE_PERSIST_PATH = null;
+  log('FAILURE_PERSIST_PATH not set, failure counts will reset on container restart');
+}
 
 const headers = { Authorization: 'Bearer ' + TOKEN };
+
+const failureCounts = new Map();
+const countedFailedTaskIds = new Set();
+
+function loadFailureCounts() {
+  if (!FAILURE_PERSIST_PATH) return;
+  try {
+    if (fs.existsSync(FAILURE_PERSIST_PATH)) {
+      const data = JSON.parse(fs.readFileSync(FAILURE_PERSIST_PATH, 'utf8'));
+      for (const [itemId, count] of Object.entries(data)) {
+        failureCounts.set(itemId, count);
+      }
+      log(`Loaded failure counts for ${failureCounts.size} item(s) from ${FAILURE_PERSIST_PATH}`);
+    }
+  } catch (error) {
+    log('Warning: failed to load failure counts from ' + FAILURE_PERSIST_PATH + ': ' + error.message);
+  }
+}
+
+function saveFailureCounts() {
+  if (!FAILURE_PERSIST_PATH) return;
+  try {
+    const data = Object.fromEntries(failureCounts);
+    fs.writeFileSync(FAILURE_PERSIST_PATH, JSON.stringify(data, null, 2), 'utf8');
+  } catch (error) {
+    log('Warning: failed to save failure counts to ' + FAILURE_PERSIST_PATH + ': ' + error.message);
+  }
+}
+
+loadFailureCounts();
 
 function collectItems(obj, results = []) {
   if (Array.isArray(obj)) {
@@ -99,19 +146,35 @@ async function getActiveConversions() {
   try {
     const response = await axios.get(`${DOMAIN}/api/tasks`, { headers });
     const tasks = response.data?.tasks || [];
-    const active = tasks.filter(t =>
-      t.action && t.action.includes('encode-m4b') && !t.isFinished && !t.isFailed
-    );
+    const encodeTasks = tasks.filter(t => t.action && t.action.includes('encode-m4b'));
+    const active = encodeTasks.filter(t => !t.isFinished && !t.isFailed);
     const activeItemIds = new Set(active.map(t => t.data?.libraryItemId).filter(Boolean));
-    return { count: active.length, activeItemIds };
+    const newlyFailed = encodeTasks
+      .filter(t => t.isFailed && t.id && !countedFailedTaskIds.has(t.id) && t.data?.libraryItemId)
+      .map(t => ({ taskId: t.id, itemId: t.data.libraryItemId }));
+    return { count: active.length, activeItemIds, newlyFailed };
   } catch (error) {
     log('Warning: failed to fetch tasks, falling back to full slot count: ' + error.message);
-    return { count: -1, activeItemIds: new Set() };
+    return { count: -1, activeItemIds: new Set(), newlyFailed: [] };
   }
 }
 
 async function start() {
-  const { count: activeCount, activeItemIds } = await getActiveConversions();
+  const { count: activeCount, activeItemIds, newlyFailed } = await getActiveConversions();
+
+  // Process newly failed tasks and update failure counts
+  for (const { taskId, itemId } of newlyFailed) {
+    countedFailedTaskIds.add(taskId);
+    const count = (failureCounts.get(itemId) || 0) + 1;
+    failureCounts.set(itemId, count);
+    if (count >= MAX_CONVERSION_FAILURES) {
+      log(`WARNING: Item ${itemId} has failed ${count} time(s) and will be skipped — fix metadata and restart to retry`);
+    } else {
+      log(`Item ${itemId} has failed ${count}/${MAX_CONVERSION_FAILURES} time(s)`);
+    }
+  }
+  if (newlyFailed.length > 0) saveFailureCounts();
+
   let slotsAvailable;
   if (activeCount < 0) {
     slotsAvailable = MAX_PARALLEL_CONVERSIONS;
@@ -124,12 +187,14 @@ async function start() {
     return;
   }
 
+  const blockedCount = [...failureCounts.values()].filter(n => n >= MAX_CONVERSION_FAILURES).length;
   let totalStarted = 0;
 
   for (const libraryId of LIBRARY_IDS) {
     if (slotsAvailable <= 0) break;
 
-    const url = `${DOMAIN}/api/libraries/${libraryId}/items?limit=${slotsAvailable}&page=0&filter=tracks.bXVsdGk%3D`;
+    const fetchLimit = slotsAvailable + blockedCount;
+    const url = `${DOMAIN}/api/libraries/${libraryId}/items?limit=${fetchLimit}&page=0&filter=tracks.bXVsdGk%3D`;
 
     let response;
     try {
@@ -152,6 +217,11 @@ async function start() {
 
       if (activeItemIds.has(item.id)) {
         log('Skipping (already converting): ' + item.title);
+        continue;
+      }
+
+      if ((failureCounts.get(item.id) || 0) >= MAX_CONVERSION_FAILURES) {
+        log(`Skipping (too many failures): ${item.title}`);
         continue;
       }
 
