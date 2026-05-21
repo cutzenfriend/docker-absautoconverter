@@ -201,7 +201,7 @@ async function start() {
   for (const libraryId of LIBRARY_IDS) {
     if (slotsAvailable <= 0) break;
 
-    const fetchLimit = slotsAvailable + blockedCount;
+    const fetchLimit = slotsAvailable + activeItemIds.size + blockedCount;
     const url = `${DOMAIN}/api/libraries/${libraryId}/items?limit=${fetchLimit}&page=0&filter=tracks.bXVsdGk%3D`;
 
     let response;
