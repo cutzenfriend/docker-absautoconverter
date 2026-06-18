@@ -66,6 +66,7 @@ services:
 | `MAX_PARALLEL_CONVERSIONS` | No | `5` | Maximum concurrent conversions. Active tasks are checked before each cycle so this limit is respected across runs |
 | `CRON_SETTING` | No | `20 * * * *` | Cron expression for the check interval |
 | `BITRATE` | No | `128k` | M4B encoding bitrate. Set to `"source"` to match each item's original audio bitrate |
+| `BITRATE_CAP` | No | — | When set, uses the lower of the item's source bitrate and this cap (e.g. `120k`). Prevents upscaling low-bitrate books while still normalizing high-bitrate ones. Overrides `BITRATE` when set |
 | `CODEC` | No | `aac` | Audio codec for encoding (e.g. `aac`, `opus`, `mp3`). Uses Audiobookshelf's default (`aac`) if not set |
 | `MAX_CONVERSION_FAILURES` | No | `3` | Number of failed conversion attempts before an item is permanently skipped. Reset by restarting the container (or persisted via `FAILURE_PERSIST_PATH`) |
 | `FAILURE_PERSIST_PATH` | No | — | Path to a JSON file for persisting failure counts across container restarts (e.g. `/data/failures.json`). Requires a volume mount |
