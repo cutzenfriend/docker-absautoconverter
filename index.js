@@ -18,6 +18,7 @@ var BITRATE;
 var MAX_CONVERSION_FAILURES;
 var FAILURE_PERSIST_PATH;
 var CODEC;
+var BITRATE_CAP;
 
 if (process.env.TZ) {
   log('Timezone is set to: ' + process.env.TZ);
@@ -76,6 +77,12 @@ if (process.env.CODEC) {
 } else {
   CODEC = null;
   log('CODEC not set, using Audiobookshelf default (aac)');
+}
+if (process.env.BITRATE_CAP) {
+  BITRATE_CAP = process.env.BITRATE_CAP;
+  log('BITRATE_CAP is set to: ' + BITRATE_CAP + ' (will use lower of source bitrate and cap)');
+} else {
+  BITRATE_CAP = null;
 }
 if (process.env.MAX_CONVERSION_FAILURES) {
   MAX_CONVERSION_FAILURES = parseInt(process.env.MAX_CONVERSION_FAILURES);
@@ -234,7 +241,18 @@ async function start() {
       }
 
       let bitrate = BITRATE;
-      if (BITRATE === 'source') {
+      if (BITRATE_CAP) {
+        const sourceBitrate = await getSourceBitrate(item.id);
+        if (sourceBitrate) {
+          const sourceKbps = parseInt(sourceBitrate);
+          const capKbps = parseInt(BITRATE_CAP);
+          bitrate = Math.min(sourceKbps, capKbps) + 'k';
+          log(`Using ${bitrate} for: ${item.title} (source: ${sourceBitrate}, cap: ${BITRATE_CAP})`);
+        } else {
+          bitrate = BITRATE_CAP;
+          log(`Could not determine source bitrate for: ${item.title}, falling back to cap ${BITRATE_CAP}`);
+        }
+      } else if (BITRATE === 'source') {
         const sourceBitrate = await getSourceBitrate(item.id);
         if (sourceBitrate) {
           bitrate = sourceBitrate;
