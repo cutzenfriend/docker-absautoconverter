@@ -29,7 +29,8 @@ https://hub.docker.com/r/cutzenfriend/abs-autoconverter
 3. For each configured library (supports multiple, comma-separated), fetch multi-file audiobooks via the Audiobookshelf API
 4. Start `.m4b` conversions for available slots — libraries are processed sequentially and share the slot pool; already-converting and failure-blocked items are skipped
 5. Encoding uses the configured `BITRATE`, or when set to `"source"`, matches each item's original audio bitrate
-6. Repeat on a cron schedule (default: every hour at minute 20)
+6. When a conversion finishes, a summary (source files, codec, bitrate, channels → result file, codec, bitrate, channels) is logged — and optionally appended to a persistent log file via `CONVERSION_LOG_PATH`
+7. Repeat on a cron schedule (default: every hour at minute 20)
 
 ## Getting Started
 
@@ -70,6 +71,7 @@ services:
 | `CODEC` | No | `aac` | Audio codec for encoding (e.g. `aac`, `opus`, `mp3`). Uses Audiobookshelf's default (`aac`) if not set |
 | `MAX_CONVERSION_FAILURES` | No | `3` | Number of failed conversion attempts before an item is permanently skipped. Reset by restarting the container (or persisted via `FAILURE_PERSIST_PATH`) |
 | `FAILURE_PERSIST_PATH` | No | — | Path to a JSON file for persisting failure counts across container restarts (e.g. `/data/failures.json`). Requires a volume mount |
+| `CONVERSION_LOG_PATH` | No | — | Path to a persistent conversion log file (e.g. `/data/conversions.log`). One JSON line per completed conversion with before/after file path, codec, bitrate and channels. Requires a volume mount |
 | `TZ` | No | `Europe/Berlin` | Container timezone |
 
 ### Persistent failure tracking (optional)
@@ -87,6 +89,30 @@ services:
 ```
 
 To retry a skipped book, fix its metadata in Audiobookshelf and delete its entry from the JSON file (or delete the file entirely), then restart the container.
+
+### Conversion log (optional)
+
+To keep a persistent record of what was converted (useful when the container log is hard to access or not persisted, e.g. in Portainer), mount a volume and set `CONVERSION_LOG_PATH`:
+
+```yaml
+services:
+  abs-autoconverter:
+    ...
+    environment:
+      CONVERSION_LOG_PATH: "/data/conversions.log"
+    volumes:
+      - ./data:/data
+```
+
+Each completed conversion appends one JSON line with everything for that title in one place:
+
+```json
+{"title":"My Audiobook","itemId":"li_abc123","startedAt":"2026-07-13T10:20:00.000Z","finishedAt":"2026-07-13T11:20:00.000Z","requestedBitrate":"64k","before":{"fileCount":12,"path":"/audiobooks/Author/My Audiobook","codec":"mp3","bitrate":"128k","channels":2},"after":{"fileCount":1,"path":"/audiobooks/Author/My Audiobook/My Audiobook.m4b","codec":"aac","bitrate":"64k","channels":2}}
+```
+
+For multi-file sources, `before.path` is the containing folder and `before.bitrate` the highest bitrate among the source files. A completion summary is also written to the container log regardless of whether `CONVERSION_LOG_PATH` is set.
+
+Note: completion is detected on the next cron cycle after the encode task finishes. If the app itself restarts while a conversion is running, that conversion will be missing from the log (tracking is in-memory).
 
 ## Acknowledgements
 

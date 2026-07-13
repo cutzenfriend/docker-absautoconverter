@@ -19,6 +19,7 @@ var MAX_CONVERSION_FAILURES;
 var FAILURE_PERSIST_PATH;
 var CODEC;
 var BITRATE_CAP;
+var CONVERSION_LOG_PATH;
 
 if (process.env.TZ) {
   log('Timezone is set to: ' + process.env.TZ);
@@ -98,6 +99,13 @@ if (process.env.FAILURE_PERSIST_PATH) {
   FAILURE_PERSIST_PATH = null;
   log('FAILURE_PERSIST_PATH not set, failure counts will reset on container restart');
 }
+if (process.env.CONVERSION_LOG_PATH) {
+  CONVERSION_LOG_PATH = process.env.CONVERSION_LOG_PATH;
+  log('CONVERSION_LOG_PATH is set to: ' + CONVERSION_LOG_PATH);
+} else {
+  CONVERSION_LOG_PATH = null;
+  log('CONVERSION_LOG_PATH not set, conversion results will only appear in the container log');
+}
 
 const headers = { Authorization: 'Bearer ' + TOKEN };
 
@@ -143,17 +151,83 @@ function collectItems(obj, results = []) {
   return results;
 }
 
-async function getSourceBitrate(itemId) {
+async function getItemAudioInfo(itemId) {
   try {
     const response = await axios.get(`${DOMAIN}/api/items/${itemId}?expanded=1`, { headers });
     const audioFiles = response.data?.media?.audioFiles || [];
-    if (audioFiles.length === 0) return null;
-    const maxBitRate = Math.max(...audioFiles.map(f => f.bitRate || 0));
-    if (maxBitRate === 0) return null;
-    return Math.round(maxBitRate / 1000) + 'k';
+    return audioFiles.map(f => ({
+      path: f.metadata?.path || f.metadata?.filename || null,
+      codec: f.codec || null,
+      bitrateKbps: f.bitRate ? Math.round(f.bitRate / 1000) : null,
+      channels: f.channels || null,
+    }));
   } catch (error) {
-    log('Warning: failed to fetch source bitrate for item ' + itemId + ': ' + error.message);
+    log('Warning: failed to fetch audio info for item ' + itemId + ': ' + error.message);
     return null;
+  }
+}
+
+function summarizeAudioFiles(files) {
+  if (!files || files.length === 0) return null;
+  const first = files[0];
+  const maxKbps = Math.max(...files.map(f => f.bitrateKbps || 0));
+  return {
+    fileCount: files.length,
+    // For multi-file books log the containing folder, for single files the full path
+    path: files.length === 1 ? first.path : (first.path ? first.path.substring(0, first.path.lastIndexOf('/')) : null),
+    codec: first.codec,
+    bitrate: maxKbps > 0 ? maxKbps + 'k' : null,
+    channels: first.channels,
+  };
+}
+
+function sourceBitrateOf(files) {
+  if (!files || files.length === 0) return null;
+  const maxKbps = Math.max(...files.map(f => f.bitrateKbps || 0));
+  return maxKbps > 0 ? maxKbps + 'k' : null;
+}
+
+const pendingConversions = new Map();
+
+function writeConversionLog(entry) {
+  try {
+    fs.appendFileSync(CONVERSION_LOG_PATH, JSON.stringify(entry) + '\n', 'utf8');
+  } catch (error) {
+    log('Warning: failed to write conversion log to ' + CONVERSION_LOG_PATH + ': ' + error.message);
+  }
+}
+
+async function processCompletedConversions(activeItemIds, finishedTasks, failedItemIds) {
+  for (const [itemId, pending] of [...pendingConversions]) {
+    // Ignore finished tasks that predate this conversion (e.g. an earlier encode of the same item)
+    const finished = finishedTasks.some(t => t.itemId === itemId && (!t.createdAt || t.createdAt >= pending.startedAtMs - 600000));
+    if (finished) {
+      const after = summarizeAudioFiles(await getItemAudioInfo(itemId));
+      const before = pending.before;
+      const beforeText = before ? `${before.fileCount} file(s), ${before.codec || '?'} @ ${before.bitrate || '?'}` : 'unknown source';
+      const afterText = after ? `${after.codec || '?'} @ ${after.bitrate || '?'}` : 'unknown result';
+      log(`Conversion completed: ${pending.title} (${beforeText} -> ${afterText})`);
+      if (CONVERSION_LOG_PATH) {
+        writeConversionLog({
+          title: pending.title,
+          itemId,
+          startedAt: pending.startedAt,
+          finishedAt: new Date().toISOString(),
+          requestedBitrate: pending.requestedBitrate,
+          before,
+          after,
+        });
+      }
+      pendingConversions.delete(itemId);
+    } else if (activeItemIds.has(itemId)) {
+      // still running, keep waiting
+    } else if (failedItemIds.has(itemId)) {
+      // failure is already handled by the failure tracking
+      pendingConversions.delete(itemId);
+    } else {
+      log(`Warning: conversion task for "${pending.title}" disappeared (server restart?), removing from tracking`);
+      pendingConversions.delete(itemId);
+    }
   }
 }
 
@@ -167,15 +241,19 @@ async function getActiveConversions() {
     const newlyFailed = encodeTasks
       .filter(t => t.isFailed && t.id && !countedFailedTaskIds.has(t.id) && t.data?.libraryItemId)
       .map(t => ({ taskId: t.id, itemId: t.data.libraryItemId }));
-    return { count: active.length, activeItemIds, newlyFailed };
+    const finishedTasks = encodeTasks
+      .filter(t => t.isFinished && !t.isFailed && t.data?.libraryItemId)
+      .map(t => ({ itemId: t.data.libraryItemId, createdAt: t.createdAt || null }));
+    const failedItemIds = new Set(encodeTasks.filter(t => t.isFailed && t.data?.libraryItemId).map(t => t.data.libraryItemId));
+    return { count: active.length, activeItemIds, newlyFailed, finishedTasks, failedItemIds };
   } catch (error) {
     log('Warning: failed to fetch tasks, falling back to full slot count: ' + error.message);
-    return { count: -1, activeItemIds: new Set(), newlyFailed: [] };
+    return { count: -1, activeItemIds: new Set(), newlyFailed: [], finishedTasks: [], failedItemIds: new Set() };
   }
 }
 
 async function start() {
-  const { count: activeCount, activeItemIds, newlyFailed } = await getActiveConversions();
+  const { count: activeCount, activeItemIds, newlyFailed, finishedTasks, failedItemIds } = await getActiveConversions();
 
   // Process newly failed tasks and update failure counts
   for (const { taskId, itemId } of newlyFailed) {
@@ -189,6 +267,11 @@ async function start() {
     }
   }
   if (newlyFailed.length > 0) saveFailureCounts();
+
+  // Log completed conversions (skip if the task list could not be fetched)
+  if (activeCount >= 0) {
+    await processCompletedConversions(activeItemIds, finishedTasks, failedItemIds);
+  }
 
   let slotsAvailable;
   if (activeCount < 0) {
@@ -240,9 +323,11 @@ async function start() {
         continue;
       }
 
+      const sourceFiles = await getItemAudioInfo(item.id);
+      const sourceBitrate = sourceBitrateOf(sourceFiles);
+
       let bitrate = BITRATE;
       if (BITRATE_CAP) {
-        const sourceBitrate = await getSourceBitrate(item.id);
         if (sourceBitrate) {
           const sourceKbps = parseInt(sourceBitrate);
           const capKbps = parseInt(BITRATE_CAP);
@@ -253,7 +338,6 @@ async function start() {
           log(`Could not determine source bitrate for: ${item.title}, falling back to cap ${BITRATE_CAP}`);
         }
       } else if (BITRATE === 'source') {
-        const sourceBitrate = await getSourceBitrate(item.id);
         if (sourceBitrate) {
           bitrate = sourceBitrate;
           log(`Using source bitrate ${bitrate} for: ${item.title}`);
@@ -267,6 +351,13 @@ async function start() {
       try {
         const codecParam = CODEC ? `&codec=${CODEC}` : '';
         await axios.post(`${DOMAIN}/api/tools/item/${item.id}/encode-m4b?token=${TOKEN}&bitrate=${bitrate}${codecParam}`);
+        pendingConversions.set(item.id, {
+          title: item.title,
+          startedAt: new Date().toISOString(),
+          startedAtMs: Date.now(),
+          requestedBitrate: bitrate,
+          before: summarizeAudioFiles(sourceFiles),
+        });
       } catch (error) {
         log('Error starting conversion for ' + item.title + ': ' + error.message);
       }
