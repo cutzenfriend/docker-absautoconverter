@@ -1,2 +1,26 @@
 node_modules
 @eaDir
+
+# AI assistant files
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.claude-*
+AGENTS.md
+AGENT.md
+GEMINI.md
+.gemini/
+.cursor/
+.cursorrules
+.cursorignore
+.windsurf/
+.windsurfrules
+.aider*
+.copilot/
+.github/copilot-instructions.md
+copilot-instructions.md
+.codeium/
+.continue/
+.opencode/
+.mcp.json
+llms.txt
