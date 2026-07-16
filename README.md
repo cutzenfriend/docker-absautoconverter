@@ -25,11 +25,11 @@ https://hub.docker.com/r/cutzenfriend/abs-autoconverter
 ## How it works
 
 1. Check for active `.m4b` conversion tasks on the server and calculate available slots (`MAX_PARALLEL_CONVERSIONS` minus active conversions)
-2. Detect any newly failed conversion tasks and increment their failure counter — items that reach `MAX_CONVERSION_FAILURES` are skipped in all future cycles
-3. For each configured library (supports multiple, comma-separated), fetch multi-file audiobooks via the Audiobookshelf API
-4. Start `.m4b` conversions for available slots — libraries are processed sequentially and share the slot pool; already-converting and failure-blocked items are skipped
-5. Encoding uses the configured `BITRATE`, or when set to `"source"`, matches each item's original audio bitrate
-6. When a conversion finishes, a summary (source files, codec, bitrate, channels → result file, codec, bitrate, channels) is logged — and optionally appended to a persistent log file via `CONVERSION_LOG_PATH`
+2. Determine the outcome of conversions started in earlier cycles: Audiobookshelf removes encode tasks from its task list as soon as they end, so the outcome is detected by checking the item's files — a single `.m4b` means success, still multiple files means the conversion failed
+3. Successful conversions are logged with a before/after summary (and optionally appended to a persistent log file via `CONVERSION_LOG_PATH`); failed ones increment the item's failure counter, and items that reach `MAX_CONVERSION_FAILURES` are skipped in all future cycles
+4. For each configured library (supports multiple, comma-separated), fetch multi-file audiobooks via the Audiobookshelf API
+5. Start `.m4b` conversions for available slots — libraries are processed sequentially and share the slot pool; already-converting and failure-blocked items are skipped
+6. Encoding uses the configured `BITRATE`, or when set to `"source"`, matches each item's original audio bitrate
 7. Repeat on a cron schedule (default: every hour at minute 20)
 
 ## Getting Started
@@ -76,7 +76,7 @@ services:
 
 ### Persistent failure tracking (optional)
 
-If a book keeps failing (e.g. due to bad metadata), the app will skip it after `MAX_CONVERSION_FAILURES` attempts and log a warning. By default the failure count resets when the container restarts. To persist it across restarts, mount a volume and set `FAILURE_PERSIST_PATH`:
+If a book keeps failing (e.g. due to bad metadata), the app will skip it after `MAX_CONVERSION_FAILURES` attempts and log a warning. Failures are detected by checking the item's files after its encode task ends — if the book still has multiple audio files, the conversion did not succeed. Only conversions started by this app are tracked; if the app restarts while a conversion is running, that attempt's outcome is not counted. By default the failure count resets when the container restarts. To persist it across restarts, mount a volume and set `FAILURE_PERSIST_PATH`:
 
 ```yaml
 services:

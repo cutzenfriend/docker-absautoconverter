@@ -110,7 +110,6 @@ if (process.env.CONVERSION_LOG_PATH) {
 const headers = { Authorization: 'Bearer ' + TOKEN };
 
 const failureCounts = new Map();
-const countedFailedTaskIds = new Set();
 
 function loadFailureCounts() {
   if (!FAILURE_PERSIST_PATH) return;
@@ -197,16 +196,40 @@ function writeConversionLog(entry) {
   }
 }
 
-async function processCompletedConversions(activeItemIds, finishedTasks, failedItemIds) {
+function recordFailure(itemId, title) {
+  const count = (failureCounts.get(itemId) || 0) + 1;
+  failureCounts.set(itemId, count);
+  if (count >= MAX_CONVERSION_FAILURES) {
+    log(`WARNING: Conversion failed for "${title}" (${count}/${MAX_CONVERSION_FAILURES}) — item will be skipped, fix metadata and restart to retry`);
+  } else {
+    log(`Conversion failed for "${title}" (${count}/${MAX_CONVERSION_FAILURES})`);
+  }
+  saveFailureCounts();
+}
+
+// ABS removes encode tasks from /api/tasks as soon as they end (success or
+// failure), so the outcome cannot be read from the task list. Instead, once a
+// task we started is no longer active, the item's file state tells the result:
+// a successful encode replaces the audio files with a single m4b.
+async function processPendingConversions(activeItemIds) {
   for (const [itemId, pending] of [...pendingConversions]) {
-    // Ignore finished tasks that predate this conversion (e.g. an earlier encode of the same item)
-    const finished = finishedTasks.some(t => t.itemId === itemId && (!t.createdAt || t.createdAt >= pending.startedAtMs - 600000));
-    if (finished) {
-      const after = summarizeAudioFiles(await getItemAudioInfo(itemId));
+    if (activeItemIds.has(itemId)) continue; // still running
+
+    const files = await getItemAudioInfo(itemId);
+    if (files === null) {
+      pending.checkAttempts = (pending.checkAttempts || 0) + 1;
+      if (pending.checkAttempts >= 3) {
+        log(`Warning: could not determine conversion outcome for "${pending.title}", giving up`);
+        pendingConversions.delete(itemId);
+      }
+      continue;
+    }
+
+    if (files.length === 1) {
+      const after = summarizeAudioFiles(files);
       const before = pending.before;
       const beforeText = before ? `${before.fileCount} file(s), ${before.codec || '?'} @ ${before.bitrate || '?'}` : 'unknown source';
-      const afterText = after ? `${after.codec || '?'} @ ${after.bitrate || '?'}` : 'unknown result';
-      log(`Conversion completed: ${pending.title} (${beforeText} -> ${afterText})`);
+      log(`Conversion completed: ${pending.title} (${beforeText} -> ${after.codec || '?'} @ ${after.bitrate || '?'})`);
       if (CONVERSION_LOG_PATH) {
         writeConversionLog({
           title: pending.title,
@@ -218,16 +241,12 @@ async function processCompletedConversions(activeItemIds, finishedTasks, failedI
           after,
         });
       }
-      pendingConversions.delete(itemId);
-    } else if (activeItemIds.has(itemId)) {
-      // still running, keep waiting
-    } else if (failedItemIds.has(itemId)) {
-      // failure is already handled by the failure tracking
-      pendingConversions.delete(itemId);
+    } else if (files.length > 1) {
+      recordFailure(itemId, pending.title);
     } else {
-      log(`Warning: conversion task for "${pending.title}" disappeared (server restart?), removing from tracking`);
-      pendingConversions.delete(itemId);
+      log(`Warning: "${pending.title}" has no audio files anymore, cannot determine conversion outcome`);
     }
+    pendingConversions.delete(itemId);
   }
 }
 
@@ -238,39 +257,20 @@ async function getActiveConversions() {
     const encodeTasks = tasks.filter(t => t.action && t.action.includes('encode-m4b'));
     const active = encodeTasks.filter(t => !t.isFinished && !t.isFailed);
     const activeItemIds = new Set(active.map(t => t.data?.libraryItemId).filter(Boolean));
-    const newlyFailed = encodeTasks
-      .filter(t => t.isFailed && t.id && !countedFailedTaskIds.has(t.id) && t.data?.libraryItemId)
-      .map(t => ({ taskId: t.id, itemId: t.data.libraryItemId }));
-    const finishedTasks = encodeTasks
-      .filter(t => t.isFinished && !t.isFailed && t.data?.libraryItemId)
-      .map(t => ({ itemId: t.data.libraryItemId, createdAt: t.createdAt || null }));
-    const failedItemIds = new Set(encodeTasks.filter(t => t.isFailed && t.data?.libraryItemId).map(t => t.data.libraryItemId));
-    return { count: active.length, activeItemIds, newlyFailed, finishedTasks, failedItemIds };
+    return { count: active.length, activeItemIds };
   } catch (error) {
     log('Warning: failed to fetch tasks, falling back to full slot count: ' + error.message);
-    return { count: -1, activeItemIds: new Set(), newlyFailed: [], finishedTasks: [], failedItemIds: new Set() };
+    return { count: -1, activeItemIds: new Set() };
   }
 }
 
 async function start() {
-  const { count: activeCount, activeItemIds, newlyFailed, finishedTasks, failedItemIds } = await getActiveConversions();
+  const { count: activeCount, activeItemIds } = await getActiveConversions();
 
-  // Process newly failed tasks and update failure counts
-  for (const { taskId, itemId } of newlyFailed) {
-    countedFailedTaskIds.add(taskId);
-    const count = (failureCounts.get(itemId) || 0) + 1;
-    failureCounts.set(itemId, count);
-    if (count >= MAX_CONVERSION_FAILURES) {
-      log(`WARNING: Item ${itemId} has failed ${count} time(s) and will be skipped — fix metadata and restart to retry`);
-    } else {
-      log(`Item ${itemId} has failed ${count}/${MAX_CONVERSION_FAILURES} time(s)`);
-    }
-  }
-  if (newlyFailed.length > 0) saveFailureCounts();
-
-  // Log completed conversions (skip if the task list could not be fetched)
+  // Determine the outcome of conversions we started (skip if the task list
+  // could not be fetched, since then "no longer active" is not reliable)
   if (activeCount >= 0) {
-    await processCompletedConversions(activeItemIds, finishedTasks, failedItemIds);
+    await processPendingConversions(activeItemIds);
   }
 
   let slotsAvailable;
@@ -354,7 +354,6 @@ async function start() {
         pendingConversions.set(item.id, {
           title: item.title,
           startedAt: new Date().toISOString(),
-          startedAtMs: Date.now(),
           requestedBitrate: bitrate,
           before: summarizeAudioFiles(sourceFiles),
         });
