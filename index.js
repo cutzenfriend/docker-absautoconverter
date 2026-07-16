@@ -230,6 +230,19 @@ async function processPendingConversions(activeItemIds) {
       const before = pending.before;
       const beforeText = before ? `${before.fileCount} file(s), ${before.codec || '?'} @ ${before.bitrate || '?'}` : 'unknown source';
       log(`Conversion completed: ${pending.title} (${beforeText} -> ${after.codec || '?'} @ ${after.bitrate || '?'})`);
+
+      // Verify the result matches the requested bitrate. Encoders never hit
+      // the target exactly, so allow 10% (at least 8 kbps) deviation.
+      let bitrateMatched = null;
+      const requestedKbps = parseInt(pending.requestedBitrate);
+      const actualKbps = after.bitrate ? parseInt(after.bitrate) : null;
+      if (requestedKbps && actualKbps) {
+        bitrateMatched = Math.abs(actualKbps - requestedKbps) <= Math.max(requestedKbps * 0.1, 8);
+        if (!bitrateMatched) {
+          log(`WARNING: "${pending.title}" was encoded at ${after.bitrate} but ${pending.requestedBitrate} was requested`);
+        }
+      }
+
       if (CONVERSION_LOG_PATH) {
         writeConversionLog({
           title: pending.title,
@@ -237,6 +250,7 @@ async function processPendingConversions(activeItemIds) {
           startedAt: pending.startedAt,
           finishedAt: new Date().toISOString(),
           requestedBitrate: pending.requestedBitrate,
+          bitrateMatched,
           before,
           after,
         });

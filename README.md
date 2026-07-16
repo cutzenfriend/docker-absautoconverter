@@ -112,6 +112,8 @@ Each completed conversion appends one JSON line with everything for that title i
 
 For multi-file sources, `before.path` is the containing folder and `before.bitrate` the highest bitrate among the source files. A completion summary is also written to the container log regardless of whether `CONVERSION_LOG_PATH` is set.
 
+Each entry also includes `bitrateMatched`: whether the resulting bitrate is within 10% of the requested one (encoders never hit the target exactly). If it is not, a warning is written to the container log as well.
+
 Note: completion is detected on the next cron cycle after the encode task finishes. If the app itself restarts while a conversion is running, that conversion will be missing from the log (tracking is in-memory).
 
 ## Acknowledgements
