@@ -30,7 +30,8 @@ https://hub.docker.com/r/cutzenfriend/abs-autoconverter
 4. For each configured library (supports multiple, comma-separated), fetch multi-file audiobooks via the Audiobookshelf API
 5. Start `.m4b` conversions for available slots — libraries are processed sequentially and share the slot pool; already-converting and failure-blocked items are skipped
 6. Encoding uses the configured `BITRATE`, or when set to `"source"`, matches each item's original audio bitrate
-7. Repeat on a cron schedule (default: every hour at minute 20)
+7. Optionally (`CONVERT_SINGLE_FILES`), leftover slots are used to re-encode single-file books whose bitrate is more than 10% above the target
+8. Repeat on a cron schedule (default: every hour at minute 20)
 
 ## Getting Started
 
@@ -72,6 +73,7 @@ services:
 | `MAX_CONVERSION_FAILURES` | No | `3` | Number of failed conversion attempts before an item is permanently skipped. Reset by restarting the container (or persisted via `FAILURE_PERSIST_PATH`) |
 | `FAILURE_PERSIST_PATH` | No | — | Path to a JSON file for persisting failure counts across container restarts (e.g. `/data/failures.json`). Requires a volume mount |
 | `CONVERSION_LOG_PATH` | No | — | Path to a persistent conversion log file (e.g. `/data/conversions.log`). One JSON line per completed conversion with before/after file path, codec, bitrate and channels. Requires a volume mount |
+| `CONVERT_SINGLE_FILES` | No | `false` | When `true`, single-file books (mp3/m4b) whose bitrate is more than 10% above the target (`BITRATE_CAP` if set, otherwise `BITRATE`) are re-encoded. Multi-file books always take priority; only leftover slots are used. Has no effect with `BITRATE=source` unless `BITRATE_CAP` is set |
 | `TZ` | No | `Europe/Berlin` | Container timezone |
 
 ### Persistent failure tracking (optional)
@@ -123,6 +125,15 @@ For multi-file sources, `before.path` is the containing folder and `before.bitra
 Each entry also includes `bitrateMatched`: whether the resulting bitrate is within 10% of the requested one (encoders never hit the target exactly). If it is not, a warning is written to the container log as well.
 
 Note: completion is detected on the next cron cycle after the encode task finishes. If the app itself restarts while a conversion is running, that conversion will be missing from the log (tracking is in-memory).
+
+### Single-file re-encoding (optional)
+
+By default, only multi-file audiobooks are converted. With `CONVERT_SINGLE_FILES: "true"`, the app additionally re-encodes books that are already a single file (mp3 or m4b) but sit at a higher bitrate than you want:
+
+- A single-file book is re-encoded when its bitrate is more than 10% above the target (`BITRATE_CAP` if set, otherwise `BITRATE`)
+- Multi-file books always take priority — single-file re-encodes only use leftover conversion slots
+- Large libraries are scanned gradually (at most 100 bitrate checks per cycle); books already at or below the target are remembered and not checked again until the container restarts
+- Failure tracking and the conversion log work the same as for multi-file conversions
 
 ## Acknowledgements
 

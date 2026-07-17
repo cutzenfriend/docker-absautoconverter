@@ -20,6 +20,7 @@ var FAILURE_PERSIST_PATH;
 var CODEC;
 var BITRATE_CAP;
 var CONVERSION_LOG_PATH;
+var CONVERT_SINGLE_FILES;
 
 if (process.env.TZ) {
   log('Timezone is set to: ' + process.env.TZ);
@@ -106,6 +107,17 @@ if (process.env.CONVERSION_LOG_PATH) {
   CONVERSION_LOG_PATH = null;
   log('CONVERSION_LOG_PATH not set, conversion results will only appear in the container log');
 }
+if (['true', '1', 'yes'].includes(String(process.env.CONVERT_SINGLE_FILES).toLowerCase())) {
+  if (BITRATE === 'source' && !BITRATE_CAP) {
+    CONVERT_SINGLE_FILES = false;
+    log('CONVERT_SINGLE_FILES has no effect with BITRATE=source and no BITRATE_CAP, disabling');
+  } else {
+    CONVERT_SINGLE_FILES = true;
+    log('CONVERT_SINGLE_FILES is enabled: single-file books above the target bitrate will be re-encoded');
+  }
+} else {
+  CONVERT_SINGLE_FILES = false;
+}
 
 const headers = { Authorization: 'Bearer ' + TOKEN };
 
@@ -189,6 +201,13 @@ function sourceBitrateOf(files) {
 
 const pendingConversions = new Map();
 
+// Single-file items already checked and found not to need a re-encode
+// (bitrate at or below the target). Avoids re-fetching them every cycle.
+const checkedSingleFileItems = new Set();
+// Limit expanded item fetches per cycle so large libraries are scanned
+// gradually instead of hammering the server in one go
+const SINGLE_FILE_CHECK_BUDGET = 100;
+
 function writeConversionLog(entry) {
   try {
     fs.appendFileSync(CONVERSION_LOG_PATH, JSON.stringify(entry) + '\n', 'utf8');
@@ -226,7 +245,24 @@ async function processPendingConversions(activeItemIds) {
       continue;
     }
 
-    if (files.length === 1) {
+    if (files.length === 0) {
+      log(`Warning: "${pending.title}" has no audio files anymore, cannot determine conversion outcome`);
+      pendingConversions.delete(itemId);
+      continue;
+    }
+
+    let succeeded;
+    if (pending.singleFile) {
+      // A single-file re-encode keeps one file either way, so the outcome
+      // shows in the bitrate: unchanged (too high) means the encode failed
+      const actualKbps = files[0].bitrateKbps || 0;
+      const requestedKbps = parseInt(pending.requestedBitrate) || 0;
+      succeeded = files.length === 1 && requestedKbps > 0 && actualKbps > 0 && actualKbps <= requestedKbps * 1.1;
+    } else {
+      succeeded = files.length === 1;
+    }
+
+    if (succeeded) {
       const after = summarizeAudioFiles(files);
       const before = pending.before;
       const beforeText = before ? `${before.fileCount} file(s), ${before.codec || '?'} @ ${before.bitrate || '?'}` : 'unknown source';
@@ -244,6 +280,8 @@ async function processPendingConversions(activeItemIds) {
         }
       }
 
+      if (pending.singleFile) checkedSingleFileItems.add(itemId);
+
       if (CONVERSION_LOG_PATH) {
         writeConversionLog({
           title: pending.title,
@@ -256,13 +294,86 @@ async function processPendingConversions(activeItemIds) {
           after,
         });
       }
-    } else if (files.length > 1) {
-      recordFailure(itemId, pending.title);
     } else {
-      log(`Warning: "${pending.title}" has no audio files anymore, cannot determine conversion outcome`);
+      recordFailure(itemId, pending.title);
     }
     pendingConversions.delete(itemId);
   }
+}
+
+// Re-encode single-file books whose bitrate is more than 10% above the
+// target (BITRATE_CAP if set, otherwise BITRATE). Only runs with leftover
+// slots after all multi-file books have been handled. Returns the number
+// of re-encodes started.
+async function convertSingleFileItems(slotsAvailable, activeItemIds) {
+  const targetKbps = parseInt(BITRATE_CAP || BITRATE);
+  if (!targetKbps) return 0;
+  let checkBudget = SINGLE_FILE_CHECK_BUDGET;
+  let started = 0;
+
+  for (const libraryId of LIBRARY_IDS) {
+    if (slotsAvailable <= 0 || checkBudget <= 0) break;
+
+    let page = 0;
+    while (slotsAvailable > 0 && checkBudget > 0) {
+      // filter=tracks.c2luZ2xl is base64 for "single"
+      const url = `${DOMAIN}/api/libraries/${libraryId}/items?limit=100&page=${page}&filter=tracks.c2luZ2xl`;
+      let response;
+      try {
+        response = await axios.get(url, { headers });
+      } catch (error) {
+        log('Error fetching single-file items from library ' + libraryId + ': ' + error.message);
+        break;
+      }
+
+      const items = collectItems(response.data);
+      if (items.length === 0) break;
+
+      for (const item of items) {
+        if (slotsAvailable <= 0 || checkBudget <= 0) break;
+        if (checkedSingleFileItems.has(item.id)) continue;
+        if (activeItemIds.has(item.id) || pendingConversions.has(item.id)) continue;
+        if ((failureCounts.get(item.id)?.count || 0) >= MAX_CONVERSION_FAILURES) continue;
+
+        checkBudget--;
+        const files = await getItemAudioInfo(item.id);
+        if (files === null) continue; // fetch failed, retry next cycle
+        if (files.length !== 1) {
+          checkedSingleFileItems.add(item.id);
+          continue;
+        }
+
+        const sourceKbps = files[0].bitrateKbps || 0;
+        if (sourceKbps <= targetKbps * 1.1) {
+          checkedSingleFileItems.add(item.id);
+          continue;
+        }
+
+        const bitrate = targetKbps + 'k';
+        log(`Starting single-file re-encode: ${item.title} (${sourceKbps}k -> ${bitrate})`);
+        try {
+          const codecParam = CODEC ? `&codec=${CODEC}` : '';
+          await axios.post(`${DOMAIN}/api/tools/item/${item.id}/encode-m4b?token=${TOKEN}&bitrate=${bitrate}${codecParam}`);
+          pendingConversions.set(item.id, {
+            title: item.title,
+            startedAt: new Date().toISOString(),
+            requestedBitrate: bitrate,
+            before: summarizeAudioFiles(files),
+            singleFile: true,
+          });
+          slotsAvailable--;
+          started++;
+        } catch (error) {
+          log('Error starting re-encode for ' + item.title + ': ' + error.message);
+        }
+      }
+
+      if (items.length < 100) break; // last page
+      page++;
+    }
+  }
+
+  return started;
 }
 
 async function getActiveConversions() {
@@ -379,6 +490,12 @@ async function start() {
       slotsAvailable--;
       totalStarted++;
     }
+  }
+
+  if (CONVERT_SINGLE_FILES && slotsAvailable > 0) {
+    const started = await convertSingleFileItems(slotsAvailable, activeItemIds);
+    slotsAvailable -= started;
+    totalStarted += started;
   }
 
   log(`Conversion cycle complete: ${totalStarted} conversion(s) started`);
