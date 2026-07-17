@@ -116,8 +116,9 @@ function loadFailureCounts() {
   try {
     if (fs.existsSync(FAILURE_PERSIST_PATH)) {
       const data = JSON.parse(fs.readFileSync(FAILURE_PERSIST_PATH, 'utf8'));
-      for (const [itemId, count] of Object.entries(data)) {
-        failureCounts.set(itemId, count);
+      for (const [itemId, value] of Object.entries(data)) {
+        // Files written before v1.6.3 stored a plain number instead of { title, count }
+        failureCounts.set(itemId, typeof value === 'number' ? { title: null, count: value } : value);
       }
       log(`Loaded failure counts for ${failureCounts.size} item(s) from ${FAILURE_PERSIST_PATH}`);
     }
@@ -197,8 +198,8 @@ function writeConversionLog(entry) {
 }
 
 function recordFailure(itemId, title) {
-  const count = (failureCounts.get(itemId) || 0) + 1;
-  failureCounts.set(itemId, count);
+  const count = (failureCounts.get(itemId)?.count || 0) + 1;
+  failureCounts.set(itemId, { title, count });
   if (count >= MAX_CONVERSION_FAILURES) {
     log(`WARNING: Conversion failed for "${title}" (${count}/${MAX_CONVERSION_FAILURES}) — item will be skipped, fix metadata and restart to retry`);
   } else {
@@ -299,7 +300,7 @@ async function start() {
     return;
   }
 
-  const blockedCount = [...failureCounts.values()].filter(n => n >= MAX_CONVERSION_FAILURES).length;
+  const blockedCount = [...failureCounts.values()].filter(f => f.count >= MAX_CONVERSION_FAILURES).length;
   let totalStarted = 0;
 
   for (const libraryId of LIBRARY_IDS) {
@@ -332,7 +333,7 @@ async function start() {
         continue;
       }
 
-      if ((failureCounts.get(item.id) || 0) >= MAX_CONVERSION_FAILURES) {
+      if ((failureCounts.get(item.id)?.count || 0) >= MAX_CONVERSION_FAILURES) {
         log(`Skipping (too many failures): ${item.title}`);
         continue;
       }

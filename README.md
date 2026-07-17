@@ -88,7 +88,15 @@ services:
       - ./data:/data
 ```
 
-To retry a skipped book, fix its metadata in Audiobookshelf and delete its entry from the JSON file (or delete the file entirely), then restart the container.
+The file records the title along with the failure count, so problem books are easy to find in Audiobookshelf:
+
+```json
+{
+  "li_abc123": { "title": "My Broken Audiobook", "count": 3 }
+}
+```
+
+To retry a skipped book, fix its metadata in Audiobookshelf and delete its entry from the JSON file (or delete the file entirely), then restart the container. Files written by older versions (plain counts without titles) keep working and are upgraded as new failures are recorded.
 
 ### Conversion log (optional)
 
