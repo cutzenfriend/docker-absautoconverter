@@ -21,6 +21,7 @@ var CODEC;
 var BITRATE_CAP;
 var CONVERSION_LOG_PATH;
 var CONVERT_SINGLE_FILES;
+var RUN_ON_START;
 
 if (process.env.TZ) {
   log('Timezone is set to: ' + process.env.TZ);
@@ -54,6 +55,12 @@ if (process.env.CRON_SETTING) {
 } else {
   CRON_SETTING = '20 * * * *';
   log('CRON_SETTING set to default (20 * * * *)');
+}
+if (['true', '1', 'yes'].includes(String(process.env.RUN_ON_START).toLowerCase())) {
+  RUN_ON_START = true;
+  log('RUN_ON_START is enabled');
+} else {
+  RUN_ON_START = false;
 }
 if (process.env.TOKEN) {
   log('TOKEN is set');
@@ -501,9 +508,20 @@ async function start() {
   log(`Conversion cycle complete: ${totalStarted} conversion(s) started`);
 }
 
-// CRON START
-cron.schedule(CRON_SETTING, () => {
-  start().catch(error => {
-    log('Unhandled error in start(): ' + error.message);
+function scheduleCron() {
+  cron.schedule(CRON_SETTING, () => {
+    start().catch(error => {
+      log('Unhandled error in start(): ' + error.message);
+    });
   });
-});
+}
+
+if (RUN_ON_START) {
+  start()
+    .catch(error => {
+      log('Unhandled error in initial start(): ' + error.message);
+    })
+    .finally(scheduleCron);
+} else {
+  scheduleCron();
+}

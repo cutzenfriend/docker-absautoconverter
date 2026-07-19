@@ -54,6 +54,7 @@ services:
       LIBRARY_ID: "lib1-id,lib2-id" #Please edit - mandatory, comma-separated for multiple libraries
       MAX_PARALLEL_CONVERSIONS: 3 #Keep CPU power in mind. Too many conversion in parallel decrease performance on your host!
       #CRON_SETTING: #optional - default is: (20 * * * * ) - every hour at minute 20
+      #RUN_ON_START: "true" #optional - run once immediately, then continue with the cron schedule
       BITRATE: "128k" #optional - default is 128k, set to "source" to match each item's original bitrate
       TOKEN: "YOUR AUDIOBOOKSHELF API TOKEN" #Please edit - mandatory
 ```
@@ -67,6 +68,7 @@ services:
 | `TOKEN` | Yes | — | Audiobookshelf API token |
 | `MAX_PARALLEL_CONVERSIONS` | No | `5` | Maximum concurrent conversions. Active tasks are checked before each cycle so this limit is respected across runs |
 | `CRON_SETTING` | No | `20 * * * *` | Cron expression for the check interval |
+| `RUN_ON_START` | No | `false` | When `true`, runs one conversion cycle immediately at container startup, then continues with `CRON_SETTING` |
 | `BITRATE` | No | `128k` | M4B encoding bitrate. Set to `"source"` to match each item's original audio bitrate |
 | `BITRATE_CAP` | No | — | When set, uses the lower of the item's source bitrate and this cap (e.g. `120k`). Prevents upscaling low-bitrate books while still normalizing high-bitrate ones. Overrides `BITRATE` when set |
 | `CODEC` | No | `aac` | Audio codec for encoding (e.g. `aac`, `opus`, `mp3`). Uses Audiobookshelf's default (`aac`) if not set |
