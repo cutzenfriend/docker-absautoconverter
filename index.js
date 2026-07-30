@@ -317,6 +317,7 @@ async function convertSingleFileItems(slotsAvailable, activeItemIds) {
   if (!targetKbps) return 0;
   let checkBudget = SINGLE_FILE_CHECK_BUDGET;
   let started = 0;
+  let checkedThisCycle = 0;
 
   for (const libraryId of LIBRARY_IDS) {
     if (slotsAvailable <= 0 || checkBudget <= 0) break;
@@ -340,18 +341,31 @@ async function convertSingleFileItems(slotsAvailable, activeItemIds) {
         if (slotsAvailable <= 0 || checkBudget <= 0) break;
         if (checkedSingleFileItems.has(item.id)) continue;
         if (activeItemIds.has(item.id) || pendingConversions.has(item.id)) continue;
-        if ((failureCounts.get(item.id)?.count || 0) >= MAX_CONVERSION_FAILURES) continue;
-
-        checkBudget--;
-        const files = await getItemAudioInfo(item.id);
-        if (files === null) continue; // fetch failed, retry next cycle
-        if (files.length !== 1) {
+        if ((failureCounts.get(item.id)?.count || 0) >= MAX_CONVERSION_FAILURES) {
+          log(`Single-file skip: ${item.title} — too many failed conversion attempts`);
           checkedSingleFileItems.add(item.id);
           continue;
         }
 
+        checkBudget--;
+        checkedThisCycle++;
+        const files = await getItemAudioInfo(item.id);
+        if (files === null) continue; // fetch failed, retry next cycle
+        if (files.length !== 1) {
+          log(`Single-file skip: ${item.title} — item no longer has exactly one audio file`);
+          checkedSingleFileItems.add(item.id);
+          continue;
+        }
+
+        const codec = files[0].codec || 'unknown codec';
         const sourceKbps = files[0].bitrateKbps || 0;
+        if (sourceKbps === 0) {
+          log(`Single-file skip: ${item.title} (${codec}) — could not determine bitrate`);
+          checkedSingleFileItems.add(item.id);
+          continue;
+        }
         if (sourceKbps <= targetKbps * 1.1) {
+          log(`Single-file skip: ${item.title} (${codec} @ ${sourceKbps}k) — within target ${targetKbps}k (+10% tolerance), no re-encode needed`);
           checkedSingleFileItems.add(item.id);
           continue;
         }
@@ -378,6 +392,12 @@ async function convertSingleFileItems(slotsAvailable, activeItemIds) {
       if (items.length < 100) break; // last page
       page++;
     }
+  }
+
+  // Books already checked in earlier cycles are cached and skipped silently,
+  // so a quiet cycle after the initial scan is expected
+  if (checkedThisCycle > 0 || started > 0) {
+    log(`Single-file scan: checked ${checkedThisCycle} book(s) this cycle, started ${started} re-encode(s)`);
   }
 
   return started;
