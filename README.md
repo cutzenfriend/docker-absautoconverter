@@ -30,7 +30,7 @@ https://hub.docker.com/r/cutzenfriend/abs-autoconverter
 4. For each configured library (supports multiple, comma-separated), fetch multi-file audiobooks via the Audiobookshelf API
 5. Start `.m4b` conversions for available slots — libraries are processed sequentially and share the slot pool; already-converting and failure-blocked items are skipped
 6. Encoding uses the configured `BITRATE`, or when set to `"source"`, matches each item's original audio bitrate
-7. Optionally (`CONVERT_SINGLE_FILES`), leftover slots are used to re-encode single-file books whose bitrate is more than 10% above the target
+7. Optionally, leftover slots are used for single-file books: `CONVERT_SINGLE_FILES` re-encodes those more than 10% above the target bitrate, `CONVERT_NON_M4B` converts those that are not m4b regardless of bitrate
 8. Repeat on a cron schedule (default: every hour at minute 20)
 
 ## Getting Started
@@ -76,6 +76,7 @@ services:
 | `FAILURE_PERSIST_PATH` | No | — | Path to a JSON file for persisting failure counts across container restarts (e.g. `/data/failures.json`). Requires a volume mount |
 | `CONVERSION_LOG_PATH` | No | — | Path to a persistent conversion log file (e.g. `/data/conversions.log`). One JSON line per completed conversion with before/after file path, codec, bitrate and channels. Requires a volume mount |
 | `CONVERT_SINGLE_FILES` | No | `false` | When `true`, single-file books (mp3/m4b) whose bitrate is more than 10% above the target (`BITRATE_CAP` if set, otherwise `BITRATE`) are re-encoded. Multi-file books always take priority; only leftover slots are used. Has no effect with `BITRATE=source` unless `BITRATE_CAP` is set |
+| `CONVERT_NON_M4B` | No | `false` | When `true`, single-file books that are not `.m4b` (e.g. a single mp3) are converted to m4b regardless of their bitrate, encoded at the lower of their source bitrate and the target — nothing gets upscaled. Can be combined with `CONVERT_SINGLE_FILES` |
 | `TZ` | No | `Europe/Berlin` | Container timezone |
 
 ### Persistent failure tracking (optional)
@@ -132,9 +133,10 @@ Note: completion is detected on the next cron cycle after the encode task finish
 
 By default, only multi-file audiobooks are converted. With `CONVERT_SINGLE_FILES: "true"`, the app additionally re-encodes books that are already a single file (mp3 or m4b) but sit at a higher bitrate than you want:
 
-- A single-file book is re-encoded when its bitrate is more than 10% above the target (`BITRATE_CAP` if set, otherwise `BITRATE`)
-- Multi-file books always take priority — single-file re-encodes only use leftover conversion slots
-- Large libraries are scanned gradually (at most 100 bitrate checks per cycle); books already at or below the target are remembered and not checked again until the container restarts
+- With `CONVERT_SINGLE_FILES`, a single-file book is re-encoded when its bitrate is more than 10% above the target (`BITRATE_CAP` if set, otherwise `BITRATE`)
+- With `CONVERT_NON_M4B: "true"`, single-file books that are not `.m4b` (e.g. a single mp3) are converted to m4b regardless of their bitrate — useful if you want a library that contains only m4b files. Encoding uses the lower of the source bitrate and the target, so low-bitrate books are never upscaled. Both flags can be combined
+- Multi-file books always take priority — single-file conversions only use leftover conversion slots
+- Large libraries are scanned gradually (at most 100 bitrate checks per cycle); books that don't need conversion are remembered and not checked again until the container restarts. Every checked book is logged with its codec, bitrate and the decision
 - Failure tracking and the conversion log work the same as for multi-file conversions
 
 ## Acknowledgements

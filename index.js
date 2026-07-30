@@ -21,6 +21,7 @@ var CODEC;
 var BITRATE_CAP;
 var CONVERSION_LOG_PATH;
 var CONVERT_SINGLE_FILES;
+var CONVERT_NON_M4B;
 var RUN_ON_START;
 
 if (process.env.TZ) {
@@ -124,6 +125,12 @@ if (['true', '1', 'yes'].includes(String(process.env.CONVERT_SINGLE_FILES).toLow
   }
 } else {
   CONVERT_SINGLE_FILES = false;
+}
+if (['true', '1', 'yes'].includes(String(process.env.CONVERT_NON_M4B).toLowerCase())) {
+  CONVERT_NON_M4B = true;
+  log('CONVERT_NON_M4B is enabled: single-file books that are not m4b will be converted regardless of bitrate');
+} else {
+  CONVERT_NON_M4B = false;
 }
 
 const headers = { Authorization: 'Bearer ' + TOKEN };
@@ -260,11 +267,14 @@ async function processPendingConversions(activeItemIds) {
 
     let succeeded;
     if (pending.singleFile) {
-      // A single-file re-encode keeps one file either way, so the outcome
-      // shows in the bitrate: unchanged (too high) means the encode failed
+      // A single-file conversion keeps one file either way, so the outcome
+      // shows in the result itself: it must be an m4b at (or below) the
+      // requested bitrate — an unchanged file means the encode failed
       const actualKbps = files[0].bitrateKbps || 0;
       const requestedKbps = parseInt(pending.requestedBitrate) || 0;
-      succeeded = files.length === 1 && requestedKbps > 0 && actualKbps > 0 && actualKbps <= requestedKbps * 1.1;
+      const resultPath = (files[0].path || '').toLowerCase();
+      const isM4b = resultPath === '' || resultPath.endsWith('.m4b');
+      succeeded = files.length === 1 && isM4b && requestedKbps > 0 && actualKbps > 0 && actualKbps <= requestedKbps * 1.1;
     } else {
       succeeded = files.length === 1;
     }
@@ -308,13 +318,16 @@ async function processPendingConversions(activeItemIds) {
   }
 }
 
-// Re-encode single-file books whose bitrate is more than 10% above the
-// target (BITRATE_CAP if set, otherwise BITRATE). Only runs with leftover
-// slots after all multi-file books have been handled. Returns the number
-// of re-encodes started.
+// Convert single-file books. Two independent opt-ins share this scan:
+// CONVERT_SINGLE_FILES re-encodes books whose bitrate is more than 10% above
+// the target (BITRATE_CAP if set, otherwise BITRATE); CONVERT_NON_M4B
+// converts books that are not m4b regardless of bitrate. Encoding always
+// uses min(source, target) so nothing gets upscaled. Only runs with leftover
+// slots after all multi-file books have been handled. Returns the number of
+// conversions started.
 async function convertSingleFileItems(slotsAvailable, activeItemIds) {
-  const targetKbps = parseInt(BITRATE_CAP || BITRATE);
-  if (!targetKbps) return 0;
+  const targetKbps = parseInt(BITRATE_CAP || BITRATE) || null;
+  if (!targetKbps && !CONVERT_NON_M4B) return 0;
   let checkBudget = SINGLE_FILE_CHECK_BUDGET;
   let started = 0;
   let checkedThisCycle = 0;
@@ -359,19 +372,31 @@ async function convertSingleFileItems(slotsAvailable, activeItemIds) {
 
         const codec = files[0].codec || 'unknown codec';
         const sourceKbps = files[0].bitrateKbps || 0;
-        if (sourceKbps === 0) {
+        const isM4b = (files[0].path || '').toLowerCase().endsWith('.m4b');
+
+        const wantsFormat = CONVERT_NON_M4B && !isM4b;
+        if (sourceKbps === 0 && !wantsFormat) {
           log(`Single-file skip: ${item.title} (${codec}) — could not determine bitrate`);
           checkedSingleFileItems.add(item.id);
           continue;
         }
-        if (sourceKbps <= targetKbps * 1.1) {
-          log(`Single-file skip: ${item.title} (${codec} @ ${sourceKbps}k) — within target ${targetKbps}k (+10% tolerance), no re-encode needed`);
+        const wantsBitrate = CONVERT_SINGLE_FILES && targetKbps && sourceKbps > targetKbps * 1.1;
+        if (!wantsFormat && !wantsBitrate) {
+          const reasons = [];
+          if (CONVERT_NON_M4B && isM4b) reasons.push('already m4b');
+          if (CONVERT_SINGLE_FILES && targetKbps) reasons.push(`within target ${targetKbps}k (+10% tolerance)`);
+          log(`Single-file skip: ${item.title} (${codec} @ ${sourceKbps}k) — ${reasons.join(', ')}, no conversion needed`);
           checkedSingleFileItems.add(item.id);
           continue;
         }
 
-        const bitrate = targetKbps + 'k';
-        log(`Starting single-file re-encode: ${item.title} (${sourceKbps}k -> ${bitrate})`);
+        // min(source, target) so low-bitrate books never get upscaled; if the
+        // source bitrate is unknown, fall back to the target (or 128k)
+        const encodeKbps = sourceKbps > 0
+          ? (targetKbps ? Math.min(sourceKbps, targetKbps) : sourceKbps)
+          : (targetKbps || 128);
+        const bitrate = encodeKbps + 'k';
+        log(`Starting single-file conversion: ${item.title} (${codec} @ ${sourceKbps > 0 ? sourceKbps + 'k' : 'unknown'} -> m4b @ ${bitrate})`);
         try {
           const codecParam = CODEC ? `&codec=${CODEC}` : '';
           await axios.post(`${DOMAIN}/api/tools/item/${item.id}/encode-m4b?token=${TOKEN}&bitrate=${bitrate}${codecParam}`);
@@ -519,7 +544,7 @@ async function start() {
     }
   }
 
-  if (CONVERT_SINGLE_FILES && slotsAvailable > 0) {
+  if ((CONVERT_SINGLE_FILES || CONVERT_NON_M4B) && slotsAvailable > 0) {
     const started = await convertSingleFileItems(slotsAvailable, activeItemIds);
     slotsAvailable -= started;
     totalStarted += started;
