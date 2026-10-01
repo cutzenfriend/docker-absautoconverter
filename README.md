@@ -56,6 +56,7 @@ services:
       #CRON_SETTING: #optional - default is: (20 * * * * ) - every hour at minute 20
       #RUN_ON_START: "true" #optional - run once immediately, then continue with the cron schedule
       BITRATE: "128k" #optional - default is 128k, set to "source" to match each item's original bitrate
+      #DO_NOT_MERGE_M4B: "true" #optional - skip multi-file books containing any .m4b file
       TOKEN: "YOUR AUDIOBOOKSHELF API TOKEN" #Please edit - mandatory
 ```
 
@@ -77,6 +78,7 @@ services:
 | `CONVERSION_LOG_PATH` | No | — | Path to a persistent conversion log file (e.g. `/data/conversions.log`). One JSON line per completed conversion with before/after file path, codec, bitrate and channels. Requires a volume mount |
 | `CONVERT_SINGLE_FILES` | No | `false` | When `true`, single-file books (mp3/m4b) whose bitrate is more than 10% above the target (`BITRATE_CAP` if set, otherwise `BITRATE`) are re-encoded. Multi-file books always take priority; only leftover slots are used. Has no effect with `BITRATE=source` unless `BITRATE_CAP` is set |
 | `CONVERT_NON_M4B` | No | `false` | When `true`, single-file books that are not `.m4b` (e.g. a single mp3) are converted to m4b regardless of their bitrate, encoded at the lower of their source bitrate and the target — nothing gets upscaled. Can be combined with `CONVERT_SINGLE_FILES` |
+| `DO_NOT_MERGE_M4B` | No | `false` | When `true`, multi-file books containing any `.m4b` file are skipped, preventing existing M4B parts from being merged into one file. Does not affect single-file conversion options |
 | `TZ` | No | `Europe/Berlin` | Container timezone |
 
 ### Persistent failure tracking (optional)
