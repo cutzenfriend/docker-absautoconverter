@@ -287,6 +287,10 @@ const SINGLE_FILE_CHECK_BUDGET = 100;
 // ABS runs metadata embeds one at a time in its own queue; cap how many of
 // ours wait there so the queue doesn't fill up with a whole library
 const MAX_PENDING_EMBEDS = 10;
+// Multi-file books skipped by DO_NOT_MERGE_M4B. Counted into the library
+// fetch limit so they can't fill the fetch window and starve the books behind
+// them, and not re-fetched or re-logged every cycle. Resets on restart.
+const skippedM4bItems = new Set();
 
 function writeConversionLog(entry) {
   try {
@@ -626,7 +630,7 @@ async function start() {
   for (const libraryId of LIBRARY_IDS) {
     if (slotsAvailable <= 0) break;
 
-    const fetchLimit = slotsAvailable + activeItemIds.size + blockedCount;
+    const fetchLimit = slotsAvailable + activeItemIds.size + blockedCount + skippedM4bItems.size;
     const url = `${DOMAIN}/api/libraries/${libraryId}/items?limit=${fetchLimit}&page=0&filter=tracks.bXVsdGk%3D`;
 
     let response;
@@ -647,6 +651,7 @@ async function start() {
 
     for (const item of items) {
       if (slotsAvailable <= 0) break;
+      if (skippedM4bItems.has(item.id)) continue;
 
       if (activeItemIds.has(item.id)) {
         log('Skipping (already converting): ' + item.title);
@@ -659,9 +664,14 @@ async function start() {
       }
 
       const sourceFiles = await getItemAudioInfo(item.id);
-      if (DO_NOT_MERGE_M4B && sourceFiles?.some(file => file.path?.toLowerCase().endsWith('.m4b'))) {
-        log(`Skipping (contains an m4b file): ${item.title}`);
-        continue;
+      if (DO_NOT_MERGE_M4B) {
+        // Without the file list we can't rule out m4b parts, so don't risk a merge
+        if (sourceFiles === null) continue;
+        if (sourceFiles.some(file => file.path?.toLowerCase().endsWith('.m4b'))) {
+          log(`Skipping (contains an m4b file): ${item.title}`);
+          skippedM4bItems.add(item.id);
+          continue;
+        }
       }
       const sourceBitrate = sourceBitrateOf(sourceFiles);
 

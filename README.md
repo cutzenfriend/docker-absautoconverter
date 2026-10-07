@@ -80,7 +80,7 @@ services:
 | `EMBED_METADATA` | No | `false` | When `true`, single-file books whose embedded tags (title, author, narrator, genre, year, series) differ from the metadata in Audiobookshelf get it embedded via Audiobookshelf's quick embed (no backup copy). Books that get converted are skipped, since the conversion embeds the metadata anyway |
 | `CONVERT_SINGLE_FILES` | No | `false` | When `true`, single-file books (mp3/m4b) whose bitrate is more than 10% above the target (`BITRATE_CAP` if set, otherwise `BITRATE`) are re-encoded. Multi-file books always take priority; only leftover slots are used. Has no effect with `BITRATE=source` unless `BITRATE_CAP` is set |
 | `CONVERT_NON_M4B` | No | `false` | When `true`, single-file books that are not `.m4b` (e.g. a single mp3) are converted to m4b regardless of their bitrate, encoded at the lower of their source bitrate and the target — nothing gets upscaled. Can be combined with `CONVERT_SINGLE_FILES` |
-| `DO_NOT_MERGE_M4B` | No | `false` | When `true`, multi-file books containing any `.m4b` file are skipped, preventing existing M4B parts from being merged into one file. Does not affect single-file conversion options |
+| `DO_NOT_MERGE_M4B` | No | `false` | When `true`, multi-file books containing any `.m4b` file are skipped, preventing existing M4B parts (e.g. separate episodes) from being merged into one file. Skipped books are remembered until the container restarts and don't hold up the books behind them. Does not affect single-file conversion options |
 | `TZ` | No | `Europe/Berlin` | Container timezone |
 
 ### Persistent failure tracking (optional)
