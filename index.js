@@ -18,6 +18,7 @@ var BITRATE;
 var MAX_CONVERSION_FAILURES;
 var FAILURE_PERSIST_PATH;
 var CODEC;
+var EMBED_METADATA;
 var BITRATE_CAP;
 var CONVERSION_LOG_PATH;
 var CONVERT_SINGLE_FILES;
@@ -115,6 +116,12 @@ if (process.env.CONVERSION_LOG_PATH) {
   CONVERSION_LOG_PATH = null;
   log('CONVERSION_LOG_PATH not set, conversion results will only appear in the container log');
 }
+if (['true', '1', 'yes'].includes(String(process.env.EMBED_METADATA).toLowerCase())) {
+  EMBED_METADATA = true;
+  log('EMBED_METADATA is enabled: single-file books whose embedded tags differ from Audiobookshelf will get their metadata embedded (quick embed, no backup)');
+} else {
+  EMBED_METADATA = false;
+}
 if (['true', '1', 'yes'].includes(String(process.env.CONVERT_SINGLE_FILES).toLowerCase())) {
   if (BITRATE === 'source' && !BITRATE_CAP) {
     CONVERT_SINGLE_FILES = false;
@@ -170,27 +177,75 @@ function collectItems(obj, results = []) {
     obj.forEach(item => collectItems(item, results));
   } else if (obj && typeof obj === 'object') {
     if (obj.id && obj.media?.metadata?.title) {
-      results.push({ id: obj.id, title: obj.media.metadata.title });
+      results.push({ id: obj.id, title: obj.media.metadata.title, updatedAt: obj.updatedAt || null, isFile: !!obj.isFile });
     }
     Object.values(obj).forEach(value => collectItems(value, results));
   }
   return results;
 }
 
-async function getItemAudioInfo(itemId) {
+async function getItemDetails(itemId) {
   try {
     const response = await axios.get(`${DOMAIN}/api/items/${itemId}?expanded=1`, { headers });
     const audioFiles = response.data?.media?.audioFiles || [];
-    return audioFiles.map(f => ({
-      path: f.metadata?.path || f.metadata?.filename || null,
-      codec: f.codec || null,
-      bitrateKbps: f.bitRate ? Math.round(f.bitRate / 1000) : null,
-      channels: f.channels || null,
-    }));
+    return {
+      updatedAt: response.data?.updatedAt || null,
+      metadata: response.data?.media?.metadata || {},
+      files: audioFiles.map(f => ({
+        path: f.metadata?.path || f.metadata?.filename || null,
+        codec: f.codec || null,
+        bitrateKbps: f.bitRate ? Math.round(f.bitRate / 1000) : null,
+        channels: f.channels || null,
+        metaTags: f.metaTags || {},
+      })),
+    };
   } catch (error) {
     log('Warning: failed to fetch audio info for item ' + itemId + ': ' + error.message);
     return null;
   }
+}
+
+async function getItemAudioInfo(itemId) {
+  const details = await getItemDetails(itemId);
+  return details ? details.files : null;
+}
+
+// Mirrors getFFMetadataObject() in Audiobookshelf: the tags ABS writes when
+// embedding metadata, keyed by the field its scanner reads them back into.
+// ABS skips empty values instead of clearing the tag, so fields without a
+// value in ABS are not compared either.
+function getExpectedTags(metadata) {
+  return {
+    tagTitle: metadata.title,
+    tagArtist: (metadata.authors || []).map(a => a.name).join(', '),
+    tagAlbum: (metadata.title || '') + (metadata.subtitle ? `: ${metadata.subtitle}` : ''),
+    tagComposer: (metadata.narrators || []).join(', '),
+    tagGenre: (metadata.genres || []).join('; '),
+    tagDate: metadata.publishedYear,
+    tagGrouping: (metadata.series || []).map(s => s.name + (s.sequence ? ` #${s.sequence}` : '')).join('; '),
+  };
+}
+
+const TAG_LABELS = {
+  tagTitle: 'title',
+  tagArtist: 'author',
+  tagAlbum: 'album',
+  tagComposer: 'narrator',
+  tagGenre: 'genre',
+  tagDate: 'year',
+  tagGrouping: 'series',
+};
+
+// Returns the labels of all fields whose embedded tag differs from ABS
+function getMetadataDifferences(metadata, metaTags) {
+  const differences = [];
+  for (const [tag, expected] of Object.entries(getExpectedTags(metadata))) {
+    const want = expected == null ? '' : String(expected).trim();
+    if (!want) continue;
+    const have = metaTags[tag] == null ? '' : String(metaTags[tag]).trim();
+    if (want !== have) differences.push(TAG_LABELS[tag]);
+  }
+  return differences;
 }
 
 function summarizeAudioFiles(files) {
@@ -215,12 +270,16 @@ function sourceBitrateOf(files) {
 
 const pendingConversions = new Map();
 
-// Single-file items already checked and found not to need a re-encode
-// (bitrate at or below the target). Avoids re-fetching them every cycle.
-const checkedSingleFileItems = new Set();
+// Single-file items already checked and found to need nothing, mapped to the
+// item's updatedAt at that time. Avoids re-fetching them every cycle, while
+// an item changed in ABS (e.g. edited metadata) gets checked again.
+const checkedSingleFileItems = new Map();
 // Limit expanded item fetches per cycle so large libraries are scanned
 // gradually instead of hammering the server in one go
 const SINGLE_FILE_CHECK_BUDGET = 100;
+// ABS runs metadata embeds one at a time in its own queue; cap how many of
+// ours wait there so the queue doesn't fill up with a whole library
+const MAX_PENDING_EMBEDS = 10;
 
 function writeConversionLog(entry) {
   try {
@@ -230,32 +289,81 @@ function writeConversionLog(entry) {
   }
 }
 
-function recordFailure(itemId, title) {
+function recordFailure(itemId, title, kind = 'Conversion') {
   const count = (failureCounts.get(itemId)?.count || 0) + 1;
   failureCounts.set(itemId, { title, count });
   if (count >= MAX_CONVERSION_FAILURES) {
-    log(`WARNING: Conversion failed for "${title}" (${count}/${MAX_CONVERSION_FAILURES}) — item will be skipped, fix metadata and restart to retry`);
+    log(`WARNING: ${kind} failed for "${title}" (${count}/${MAX_CONVERSION_FAILURES}) — item will be skipped, fix metadata and restart to retry`);
   } else {
-    log(`Conversion failed for "${title}" (${count}/${MAX_CONVERSION_FAILURES})`);
+    log(`${kind} failed for "${title}" (${count}/${MAX_CONVERSION_FAILURES})`);
   }
   saveFailureCounts();
+}
+
+// Count a failed outcome check; give up after a few attempts so a broken
+// item doesn't stay tracked forever
+function retryOutcomeCheck(itemId, pending, what) {
+  pending.checkAttempts = (pending.checkAttempts || 0) + 1;
+  if (pending.checkAttempts >= 3) {
+    log(`Warning: could not determine ${what} outcome for "${pending.title}", giving up`);
+    pendingConversions.delete(itemId);
+  }
+}
+
+// ABS doesn't re-read the tags after embedding, so the stored tags would still
+// show the old values. Rescan the item first, then compare against ABS again.
+async function checkEmbedOutcome(itemId, pending) {
+  try {
+    await axios.post(`${DOMAIN}/api/items/${itemId}/scan`, null, { headers });
+  } catch (error) {
+    log(`Warning: failed to rescan "${pending.title}" after metadata embed: ${error.message}`);
+    retryOutcomeCheck(itemId, pending, 'metadata embed');
+    return;
+  }
+
+  const details = await getItemDetails(itemId);
+  if (details === null || details.files.length !== 1) {
+    retryOutcomeCheck(itemId, pending, 'metadata embed');
+    return;
+  }
+
+  const remaining = getMetadataDifferences(details.metadata, details.files[0].metaTags);
+  if (remaining.length === 0) {
+    log(`Metadata embedded: ${pending.title} (updated: ${pending.differences.join(', ')})`);
+    checkedSingleFileItems.set(itemId, details.updatedAt);
+    if (CONVERSION_LOG_PATH) {
+      writeConversionLog({
+        type: 'embed-metadata',
+        title: pending.title,
+        itemId,
+        startedAt: pending.startedAt,
+        finishedAt: new Date().toISOString(),
+        updatedFields: pending.differences,
+      });
+    }
+  } else {
+    log(`Metadata embed for "${pending.title}" did not apply, still differs in: ${remaining.join(', ')}`);
+    recordFailure(itemId, pending.title, 'Metadata embed');
+  }
+  pendingConversions.delete(itemId);
 }
 
 // ABS removes encode tasks from /api/tasks as soon as they end (success or
 // failure), so the outcome cannot be read from the task list. Instead, once a
 // task we started is no longer active, the item's file state tells the result:
 // a successful encode replaces the audio files with a single m4b.
-async function processPendingConversions(activeItemIds) {
+async function processPendingConversions(activeItemIds, embedBusyItemIds) {
   for (const [itemId, pending] of [...pendingConversions]) {
+    if (pending.embed) {
+      // Queued embeds are not in the task list yet, so check the queue too
+      if (!embedBusyItemIds.has(itemId)) await checkEmbedOutcome(itemId, pending);
+      continue;
+    }
     if (activeItemIds.has(itemId)) continue; // still running
 
     const files = await getItemAudioInfo(itemId);
     if (files === null) {
-      pending.checkAttempts = (pending.checkAttempts || 0) + 1;
-      if (pending.checkAttempts >= 3) {
-        log(`Warning: could not determine conversion outcome for "${pending.title}", giving up`);
-        pendingConversions.delete(itemId);
-      }
+      retryOutcomeCheck(itemId, pending, 'conversion');
       continue;
     }
 
@@ -297,10 +405,12 @@ async function processPendingConversions(activeItemIds) {
         }
       }
 
-      if (pending.singleFile) checkedSingleFileItems.add(itemId);
+      // The converted file is a new state, so let the next scan check it again
+      if (pending.singleFile) checkedSingleFileItems.delete(itemId);
 
       if (CONVERSION_LOG_PATH) {
         writeConversionLog({
+          type: 'encode',
           title: pending.title,
           itemId,
           startedAt: pending.startedAt,
@@ -318,25 +428,29 @@ async function processPendingConversions(activeItemIds) {
   }
 }
 
-// Convert single-file books. Two independent opt-ins share this scan:
+// Process single-file books. Three independent opt-ins share this scan:
 // CONVERT_SINGLE_FILES re-encodes books whose bitrate is more than 10% above
 // the target (BITRATE_CAP if set, otherwise BITRATE); CONVERT_NON_M4B
-// converts books that are not m4b regardless of bitrate. Encoding always
-// uses min(source, target) so nothing gets upscaled. Only runs with leftover
-// slots after all multi-file books have been handled. Returns the number of
-// conversions started.
-async function convertSingleFileItems(slotsAvailable, activeItemIds) {
+// converts books that are not m4b regardless of bitrate; EMBED_METADATA
+// embeds the ABS metadata into books that don't need a conversion but whose
+// embedded tags differ. Encoding always uses min(source, target) so nothing
+// gets upscaled. Conversions only use slots left over after the multi-file
+// books; embeds don't take conversion slots. Returns the number of
+// conversions and embeds started.
+async function processSingleFileItems(slotsAvailable, activeItemIds, embedBusyItemIds) {
   const targetKbps = parseInt(BITRATE_CAP || BITRATE) || null;
-  if (!targetKbps && !CONVERT_NON_M4B) return 0;
   let checkBudget = SINGLE_FILE_CHECK_BUDGET;
   let started = 0;
+  let embedsStarted = 0;
   let checkedThisCycle = 0;
+  let embedsInFlight = [...pendingConversions.values()].filter(p => p.embed).length;
+  const hasCapacity = () => slotsAvailable > 0 || (EMBED_METADATA && embedsInFlight < MAX_PENDING_EMBEDS);
 
   for (const libraryId of LIBRARY_IDS) {
-    if (slotsAvailable <= 0 || checkBudget <= 0) break;
+    if (checkBudget <= 0 || !hasCapacity()) break;
 
     let page = 0;
-    while (slotsAvailable > 0 && checkBudget > 0) {
+    while (checkBudget > 0 && hasCapacity()) {
       // filter=tracks.c2luZ2xl is base64 for "single"
       const url = `${DOMAIN}/api/libraries/${libraryId}/items?limit=100&page=${page}&filter=tracks.c2luZ2xl`;
       let response;
@@ -351,67 +465,96 @@ async function convertSingleFileItems(slotsAvailable, activeItemIds) {
       if (items.length === 0) break;
 
       for (const item of items) {
-        if (slotsAvailable <= 0 || checkBudget <= 0) break;
-        if (checkedSingleFileItems.has(item.id)) continue;
-        if (activeItemIds.has(item.id) || pendingConversions.has(item.id)) continue;
+        if (checkBudget <= 0 || !hasCapacity()) break;
+        if (checkedSingleFileItems.has(item.id) && checkedSingleFileItems.get(item.id) === item.updatedAt) continue;
+        if (activeItemIds.has(item.id) || embedBusyItemIds.has(item.id) || pendingConversions.has(item.id)) continue;
         if ((failureCounts.get(item.id)?.count || 0) >= MAX_CONVERSION_FAILURES) {
-          log(`Single-file skip: ${item.title} — too many failed conversion attempts`);
-          checkedSingleFileItems.add(item.id);
+          log(`Single-file skip: ${item.title} — too many failed attempts`);
+          checkedSingleFileItems.set(item.id, item.updatedAt);
           continue;
         }
 
         checkBudget--;
         checkedThisCycle++;
-        const files = await getItemAudioInfo(item.id);
-        if (files === null) continue; // fetch failed, retry next cycle
+        const details = await getItemDetails(item.id);
+        if (details === null) continue; // fetch failed, retry next cycle
+        const files = details.files;
         if (files.length !== 1) {
           log(`Single-file skip: ${item.title} — item no longer has exactly one audio file`);
-          checkedSingleFileItems.add(item.id);
+          checkedSingleFileItems.set(item.id, item.updatedAt);
           continue;
         }
 
         const codec = files[0].codec || 'unknown codec';
         const sourceKbps = files[0].bitrateKbps || 0;
+        const sourceText = sourceKbps > 0 ? sourceKbps + 'k' : 'unknown';
         const isM4b = (files[0].path || '').toLowerCase().endsWith('.m4b');
 
         const wantsFormat = CONVERT_NON_M4B && !isM4b;
-        if (sourceKbps === 0 && !wantsFormat) {
-          log(`Single-file skip: ${item.title} (${codec}) — could not determine bitrate`);
-          checkedSingleFileItems.add(item.id);
-          continue;
-        }
         const wantsBitrate = CONVERT_SINGLE_FILES && targetKbps && sourceKbps > targetKbps * 1.1;
-        if (!wantsFormat && !wantsBitrate) {
-          const reasons = [];
-          if (CONVERT_NON_M4B && isM4b) reasons.push('already m4b');
-          if (CONVERT_SINGLE_FILES && targetKbps) reasons.push(`within target ${targetKbps}k (+10% tolerance)`);
-          log(`Single-file skip: ${item.title} (${codec} @ ${sourceKbps}k) — ${reasons.join(', ')}, no conversion needed`);
-          checkedSingleFileItems.add(item.id);
+        if (wantsFormat || wantsBitrate) {
+          if (slotsAvailable <= 0) continue; // no free slot, pick it up next cycle
+
+          // min(source, target) so low-bitrate books never get upscaled; if the
+          // source bitrate is unknown, fall back to the target (or 128k)
+          const encodeKbps = sourceKbps > 0
+            ? (targetKbps ? Math.min(sourceKbps, targetKbps) : sourceKbps)
+            : (targetKbps || 128);
+          const bitrate = encodeKbps + 'k';
+          log(`Starting single-file conversion: ${item.title} (${codec} @ ${sourceText} -> m4b @ ${bitrate})`);
+          try {
+            const codecParam = CODEC ? `&codec=${CODEC}` : '';
+            await axios.post(`${DOMAIN}/api/tools/item/${item.id}/encode-m4b?token=${TOKEN}&bitrate=${bitrate}${codecParam}`);
+            pendingConversions.set(item.id, {
+              title: item.title,
+              startedAt: new Date().toISOString(),
+              requestedBitrate: bitrate,
+              before: summarizeAudioFiles(files),
+              singleFile: true,
+            });
+            slotsAvailable--;
+            started++;
+          } catch (error) {
+            log('Error starting re-encode for ' + item.title + ': ' + error.message);
+          }
           continue;
         }
 
-        // min(source, target) so low-bitrate books never get upscaled; if the
-        // source bitrate is unknown, fall back to the target (or 128k)
-        const encodeKbps = sourceKbps > 0
-          ? (targetKbps ? Math.min(sourceKbps, targetKbps) : sourceKbps)
-          : (targetKbps || 128);
-        const bitrate = encodeKbps + 'k';
-        log(`Starting single-file conversion: ${item.title} (${codec} @ ${sourceKbps > 0 ? sourceKbps + 'k' : 'unknown'} -> m4b @ ${bitrate})`);
-        try {
-          const codecParam = CODEC ? `&codec=${CODEC}` : '';
-          await axios.post(`${DOMAIN}/api/tools/item/${item.id}/encode-m4b?token=${TOKEN}&bitrate=${bitrate}${codecParam}`);
-          pendingConversions.set(item.id, {
-            title: item.title,
-            startedAt: new Date().toISOString(),
-            requestedBitrate: bitrate,
-            before: summarizeAudioFiles(files),
-            singleFile: true,
-          });
-          slotsAvailable--;
-          started++;
-        } catch (error) {
-          log('Error starting re-encode for ' + item.title + ': ' + error.message);
+        const differences = EMBED_METADATA ? getMetadataDifferences(details.metadata, files[0].metaTags) : [];
+        if (differences.length > 0) {
+          if (item.isFile) {
+            // ABS can't rescan items stored directly in the library folder,
+            // so the embed could never be verified
+            log(`Single-file skip: ${item.title} — metadata differs (${differences.join(', ')}) but the file is not in its own folder, so the embed can't be verified`);
+            checkedSingleFileItems.set(item.id, item.updatedAt);
+            continue;
+          }
+          if (embedsInFlight >= MAX_PENDING_EMBEDS) continue; // embed queue full, pick it up next cycle
+
+          // backup=0 is ABS's "Quick Embed": tag the file in place without a backup copy
+          log(`Starting metadata embed: ${item.title} (differs in: ${differences.join(', ')})`);
+          try {
+            await axios.post(`${DOMAIN}/api/tools/item/${item.id}/embed-metadata?backup=0`, null, { headers });
+            pendingConversions.set(item.id, {
+              title: item.title,
+              startedAt: new Date().toISOString(),
+              embed: true,
+              differences,
+            });
+            embedsInFlight++;
+            embedsStarted++;
+          } catch (error) {
+            log('Error starting metadata embed for ' + item.title + ': ' + error.message);
+          }
+          continue;
         }
+
+        const reasons = [];
+        if (CONVERT_NON_M4B && isM4b) reasons.push('already m4b');
+        if (CONVERT_SINGLE_FILES && targetKbps) reasons.push(sourceKbps > 0 ? `within target ${targetKbps}k (+10% tolerance)` : 'bitrate unknown');
+        if (EMBED_METADATA) reasons.push('embedded tags match Audiobookshelf');
+        log(`Single-file skip: ${item.title} (${codec} @ ${sourceText}) — ${reasons.join(', ')}, nothing to do`);
+        checkedSingleFileItems.set(item.id, item.updatedAt);
       }
 
       if (items.length < 100) break; // last page
@@ -421,34 +564,41 @@ async function convertSingleFileItems(slotsAvailable, activeItemIds) {
 
   // Books already checked in earlier cycles are cached and skipped silently,
   // so a quiet cycle after the initial scan is expected
-  if (checkedThisCycle > 0 || started > 0) {
-    log(`Single-file scan: checked ${checkedThisCycle} book(s) this cycle, started ${started} re-encode(s)`);
+  if (checkedThisCycle > 0 || started > 0 || embedsStarted > 0) {
+    const embedText = EMBED_METADATA ? `, ${embedsStarted} metadata embed(s)` : '';
+    log(`Single-file scan: checked ${checkedThisCycle} book(s) this cycle, started ${started} conversion(s)${embedText}`);
   }
 
-  return started;
+  return { started, embedsStarted };
 }
 
 async function getActiveConversions() {
   try {
-    const response = await axios.get(`${DOMAIN}/api/tasks`, { headers });
+    // include=queue also returns embeds waiting in ABS's metadata queue,
+    // which only show up as tasks once they start running
+    const response = await axios.get(`${DOMAIN}/api/tasks?include=queue`, { headers });
     const tasks = response.data?.tasks || [];
-    const encodeTasks = tasks.filter(t => t.action && t.action.includes('encode-m4b'));
-    const active = encodeTasks.filter(t => !t.isFinished && !t.isFailed);
+    const isRunning = t => !t.isFinished && !t.isFailed;
+    const active = tasks.filter(t => t.action && t.action.includes('encode-m4b') && isRunning(t));
     const activeItemIds = new Set(active.map(t => t.data?.libraryItemId).filter(Boolean));
-    return { count: active.length, activeItemIds };
+    const embedBusyItemIds = new Set([
+      ...tasks.filter(t => t.action === 'embed-metadata' && isRunning(t)).map(t => t.data?.libraryItemId),
+      ...(response.data?.queuedTaskData?.embedMetadata || []).map(d => d.libraryItemId),
+    ].filter(Boolean));
+    return { count: active.length, activeItemIds, embedBusyItemIds };
   } catch (error) {
     log('Warning: failed to fetch tasks, falling back to full slot count: ' + error.message);
-    return { count: -1, activeItemIds: new Set() };
+    return { count: -1, activeItemIds: new Set(), embedBusyItemIds: new Set() };
   }
 }
 
 async function start() {
-  const { count: activeCount, activeItemIds } = await getActiveConversions();
+  const { count: activeCount, activeItemIds, embedBusyItemIds } = await getActiveConversions();
 
   // Determine the outcome of conversions we started (skip if the task list
   // could not be fetched, since then "no longer active" is not reliable)
   if (activeCount >= 0) {
-    await processPendingConversions(activeItemIds);
+    await processPendingConversions(activeItemIds, embedBusyItemIds);
   }
 
   let slotsAvailable;
@@ -544,13 +694,16 @@ async function start() {
     }
   }
 
-  if ((CONVERT_SINGLE_FILES || CONVERT_NON_M4B) && slotsAvailable > 0) {
-    const started = await convertSingleFileItems(slotsAvailable, activeItemIds);
-    slotsAvailable -= started;
-    totalStarted += started;
+  let embedsStarted = 0;
+  if (((CONVERT_SINGLE_FILES || CONVERT_NON_M4B) && slotsAvailable > 0) || EMBED_METADATA) {
+    const result = await processSingleFileItems(slotsAvailable, activeItemIds, embedBusyItemIds);
+    slotsAvailable -= result.started;
+    totalStarted += result.started;
+    embedsStarted = result.embedsStarted;
   }
 
-  log(`Conversion cycle complete: ${totalStarted} conversion(s) started`);
+  const embedText = EMBED_METADATA ? `, ${embedsStarted} metadata embed(s)` : '';
+  log(`Conversion cycle complete: ${totalStarted} conversion(s)${embedText} started`);
 }
 
 function scheduleCron() {

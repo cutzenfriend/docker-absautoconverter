@@ -31,7 +31,8 @@ https://hub.docker.com/r/cutzenfriend/abs-autoconverter
 5. Start `.m4b` conversions for available slots — libraries are processed sequentially and share the slot pool; already-converting and failure-blocked items are skipped
 6. Encoding uses the configured `BITRATE`, or when set to `"source"`, matches each item's original audio bitrate
 7. Optionally, leftover slots are used for single-file books: `CONVERT_SINGLE_FILES` re-encodes those more than 10% above the target bitrate, `CONVERT_NON_M4B` converts those that are not m4b regardless of bitrate
-8. Repeat on a cron schedule (default: every hour at minute 20)
+8. Optionally (`EMBED_METADATA`), single-file books that don't need a conversion but whose embedded tags differ from Audiobookshelf get the Audiobookshelf metadata embedded (quick embed)
+9. Repeat on a cron schedule (default: every hour at minute 20)
 
 ## Getting Started
 
@@ -75,6 +76,7 @@ services:
 | `MAX_CONVERSION_FAILURES` | No | `3` | Number of failed conversion attempts before an item is permanently skipped. Reset by restarting the container (or persisted via `FAILURE_PERSIST_PATH`) |
 | `FAILURE_PERSIST_PATH` | No | — | Path to a JSON file for persisting failure counts across container restarts (e.g. `/data/failures.json`). Requires a volume mount |
 | `CONVERSION_LOG_PATH` | No | — | Path to a persistent conversion log file (e.g. `/data/conversions.log`). One JSON line per completed conversion with before/after file path, codec, bitrate and channels. Requires a volume mount |
+| `EMBED_METADATA` | No | `false` | When `true`, single-file books whose embedded tags (title, author, narrator, genre, year, series) differ from the metadata in Audiobookshelf get it embedded via Audiobookshelf's quick embed (no backup copy). Books that get converted are skipped, since the conversion embeds the metadata anyway |
 | `CONVERT_SINGLE_FILES` | No | `false` | When `true`, single-file books (mp3/m4b) whose bitrate is more than 10% above the target (`BITRATE_CAP` if set, otherwise `BITRATE`) are re-encoded. Multi-file books always take priority; only leftover slots are used. Has no effect with `BITRATE=source` unless `BITRATE_CAP` is set |
 | `CONVERT_NON_M4B` | No | `false` | When `true`, single-file books that are not `.m4b` (e.g. a single mp3) are converted to m4b regardless of their bitrate, encoded at the lower of their source bitrate and the target — nothing gets upscaled. Can be combined with `CONVERT_SINGLE_FILES` |
 | `TZ` | No | `Europe/Berlin` | Container timezone |
@@ -120,12 +122,18 @@ services:
 Each completed conversion appends one JSON line with everything for that title in one place:
 
 ```json
-{"title":"My Audiobook","itemId":"li_abc123","startedAt":"2026-07-13T10:20:00.000Z","finishedAt":"2026-07-13T11:20:00.000Z","requestedBitrate":"64k","before":{"fileCount":12,"path":"/audiobooks/Author/My Audiobook","codec":"mp3","bitrate":"128k","channels":2},"after":{"fileCount":1,"path":"/audiobooks/Author/My Audiobook/My Audiobook.m4b","codec":"aac","bitrate":"64k","channels":2}}
+{"type":"encode","title":"My Audiobook","itemId":"li_abc123","startedAt":"2026-07-13T10:20:00.000Z","finishedAt":"2026-07-13T11:20:00.000Z","requestedBitrate":"64k","before":{"fileCount":12,"path":"/audiobooks/Author/My Audiobook","codec":"mp3","bitrate":"128k","channels":2},"after":{"fileCount":1,"path":"/audiobooks/Author/My Audiobook/My Audiobook.m4b","codec":"aac","bitrate":"64k","channels":2}}
 ```
 
 For multi-file sources, `before.path` is the containing folder and `before.bitrate` the highest bitrate among the source files. A completion summary is also written to the container log regardless of whether `CONVERSION_LOG_PATH` is set.
 
 Each entry also includes `bitrateMatched`: whether the resulting bitrate is within 10% of the requested one (encoders never hit the target exactly). If it is not, a warning is written to the container log as well.
+
+With `EMBED_METADATA`, metadata embeds are logged too, with `type` set to `embed-metadata` and the fields that were updated:
+
+```json
+{"type":"embed-metadata","title":"My Audiobook","itemId":"li_abc123","startedAt":"2026-10-07T10:20:00.000Z","finishedAt":"2026-10-07T10:21:00.000Z","updatedFields":["title","narrator"]}
+```
 
 Note: completion is detected on the next cron cycle after the encode task finishes. If the app itself restarts while a conversion is running, that conversion will be missing from the log (tracking is in-memory).
 
@@ -136,8 +144,19 @@ By default, only multi-file audiobooks are converted. With `CONVERT_SINGLE_FILES
 - With `CONVERT_SINGLE_FILES`, a single-file book is re-encoded when its bitrate is more than 10% above the target (`BITRATE_CAP` if set, otherwise `BITRATE`)
 - With `CONVERT_NON_M4B: "true"`, single-file books that are not `.m4b` (e.g. a single mp3) are converted to m4b regardless of their bitrate — useful if you want a library that contains only m4b files. Encoding uses the lower of the source bitrate and the target, so low-bitrate books are never upscaled. Both flags can be combined
 - Multi-file books always take priority — single-file conversions only use leftover conversion slots
-- Large libraries are scanned gradually (at most 100 bitrate checks per cycle); books that don't need conversion are remembered and not checked again until the container restarts. Every checked book is logged with its codec, bitrate and the decision
+- Large libraries are scanned gradually (at most 100 bitrate checks per cycle); books that don't need conversion are remembered and only checked again when they change in Audiobookshelf. Every checked book is logged with its codec, bitrate and the decision
 - Failure tracking and the conversion log work the same as for multi-file conversions
+
+### Quick metadata embed (optional)
+
+Many books don't need a conversion, but the tags embedded in their file are outdated — for example after fixing the metadata in Audiobookshelf. With `EMBED_METADATA: "true"`, the app compares each single-file book's embedded tags against Audiobookshelf and embeds the Audiobookshelf metadata where they differ, using Audiobookshelf's own quick embed (the file is tagged in place, without a backup copy):
+
+- Compared fields are the ones Audiobookshelf writes when embedding: title, author, album (title and subtitle), narrator, genre, year and series. Fields that are empty in Audiobookshelf are not compared, because Audiobookshelf doesn't clear them in the file either
+- Conversions take priority: a book that gets converted (e.g. via `CONVERT_NON_M4B`) is not embedded separately, since the conversion writes the metadata into the new file
+- Audiobookshelf runs embeds one at a time in its own queue; at most 10 embeds from this app wait there at once. Embeds don't take conversion slots
+- After an embed, the book is rescanned in Audiobookshelf and compared again, so the log only reports an embed as done once the new tags are actually in the file. If the tags still differ, it counts as a failed attempt towards `MAX_CONVERSION_FAILURES`
+- Books whose tags already match are remembered, but are checked again automatically when they change in Audiobookshelf — edit a book's metadata and it gets embedded on the next scan
+- Only books in their own folder are supported; a single audio file stored directly in the library folder can't be rescanned by Audiobookshelf, so it is skipped with a note in the log
 
 ## Acknowledgements
 
