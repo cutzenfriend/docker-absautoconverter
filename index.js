@@ -24,6 +24,7 @@ var CONVERSION_LOG_PATH;
 var CONVERT_SINGLE_FILES;
 var CONVERT_NON_M4B;
 var RUN_ON_START;
+var DO_NOT_MERGE_M4B;
 
 if (process.env.TZ) {
   log('Timezone is set to: ' + process.env.TZ);
@@ -138,6 +139,12 @@ if (['true', '1', 'yes'].includes(String(process.env.CONVERT_NON_M4B).toLowerCas
   log('CONVERT_NON_M4B is enabled: single-file books that are not m4b will be converted regardless of bitrate');
 } else {
   CONVERT_NON_M4B = false;
+}
+if (['true', '1', 'yes'].includes(String(process.env.DO_NOT_MERGE_M4B).toLowerCase())) {
+  DO_NOT_MERGE_M4B = true;
+  log('DO_NOT_MERGE_M4B is enabled: multi-file books containing m4b files will be skipped');
+} else {
+  DO_NOT_MERGE_M4B = false;
 }
 
 const headers = { Authorization: 'Bearer ' + TOKEN };
@@ -652,6 +659,10 @@ async function start() {
       }
 
       const sourceFiles = await getItemAudioInfo(item.id);
+      if (DO_NOT_MERGE_M4B && sourceFiles?.some(file => file.path?.toLowerCase().endsWith('.m4b'))) {
+        log(`Skipping (contains an m4b file): ${item.title}`);
+        continue;
+      }
       const sourceBitrate = sourceBitrateOf(sourceFiles);
 
       let bitrate = BITRATE;
